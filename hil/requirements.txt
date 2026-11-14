@@ -1,0 +1,3 @@
+pytest>=8
+pylink-square>=1.2
+numpy>=1.24

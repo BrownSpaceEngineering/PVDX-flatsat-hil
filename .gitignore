@@ -1,0 +1,12 @@
+# Tester build output
+tester/build/
+tester/tester.elf
+tester/tester.bin
+tester/tester.uf2
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+
+.DS_Store
