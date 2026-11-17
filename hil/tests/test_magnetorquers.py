@@ -1,4 +1,4 @@
-"""Magnetorquer H-bridge drive (src/drivers/magnetorquer/magnetorquer_driver.c), on the logic analyzer.
+"""Magnetorquer H-bridge drive (src/drivers/magnetorquer/magnetorquer_driver.c), recorded by the tester.
 
 Each axis has a DRV8837: IN1 carries the PWM for positive duty, IN2 for negative, both low to coast, and nSLEEP high
 only while driving. ADCS drives the coils for ADCS_LOOP_PERIOD_MS (100 ms), then stops them while the magnetometer
@@ -10,7 +10,7 @@ import re
 
 import pytest
 
-from conftest import require_signals, set_environment
+from conftest import set_environment
 
 AXES = ["x", "y", "z"]
 PWM_PERIOD_S = 1e-3  # CONF_TCC0_WAVE_PER_VAL / CONF_TCC1_WAVE_PER_VAL, 1000 us
@@ -56,28 +56,27 @@ def bursts(in1, in2):
 @pytest.fixture(scope="module")
 def drive_capture(tester_session, flatsat, logic):
     signals = [f"mtq_{axis}_in{n}" for axis in AXES for n in (1, 2)]
-    require_signals(logic, *signals)
     tester_session.reset()
     set_environment(tester_session)
     flatsat.boot()
     flatsat.collect(r"adcs:", 3.0)  # Let ADCS settle into its loop
-    slp = [s for s in (f"mtq_{axis}_slp" for axis in AXES) if s in logic.channel_map]
+    slp = [f"mtq_{axis}_slp" for axis in AXES]
     since = flatsat.mark()
-    capture = logic.capture(signals + slp, CAPTURE_S, samplerate=1_000_000)
+    capture = logic.capture(signals + slp, CAPTURE_S)
     duties = [tuple(float(x) for x in m.groups()) for m in flatsat.find_all(DUTY_LOG, since)]
-    return capture, duties, slp
+    return capture, duties
 
 
 @pytest.mark.parametrize("axis", AXES)
 def test_no_shoot_through(drive_capture, axis):
-    capture, _, _ = drive_capture
+    capture, _ = drive_capture
     both_high = overlap(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])
     assert both_high == 0.0, f"IN1 and IN2 of {axis} were both high for {both_high * 1e6:.1f} us"
 
 
 @pytest.mark.parametrize("axis", AXES)
 def test_pwm_period(drive_capture, axis):
-    capture, _, _ = drive_capture
+    capture, _ = drive_capture
     periods = [p for p in (capture[f"mtq_{axis}_in{n}"].period() for n in (1, 2)) if p]
     if not periods:
         pytest.skip(f"no PWM on axis {axis} during the capture (B-dot asked for no drive; try the manual test)")
@@ -87,7 +86,7 @@ def test_pwm_period(drive_capture, axis):
 
 @pytest.mark.parametrize("axis", AXES)
 def test_burst_duty_matches_the_logged_duty(drive_capture, axis):
-    capture, duties, _ = drive_capture
+    capture, duties = drive_capture
     index = AXES.index(axis)
     measured = bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])
     logged = [d[index] for d in duties if abs(d[index]) > 0.005]
@@ -100,11 +99,8 @@ def test_burst_duty_matches_the_logged_duty(drive_capture, axis):
 
 @pytest.mark.parametrize("axis", AXES)
 def test_sleep_line_tracks_the_drive(drive_capture, axis):
-    capture, _, slp = drive_capture
-    name = f"mtq_{axis}_slp"
-    if name not in slp:
-        pytest.skip(f"{name} not mapped in hil/logic_channels.json")
-    sleep_line = capture[name]
+    capture, _ = drive_capture
+    sleep_line = capture[f"mtq_{axis}_slp"]
     for start, duty in bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"]):
         assert sleep_line.level_at(start + 1e-4) == 1, f"nSLEEP low while driving at {start:.4f} s (duty {duty:.3f})"
 
@@ -113,10 +109,9 @@ def test_sleep_line_tracks_the_drive(drive_capture, axis):
 def test_rotating_the_board_reverses_bdot(tester, flatsat, logic):
     """Rotate the flatsat back and forth about any axis during the 20 s capture: B-dot should drive both directions."""
     signals = [f"mtq_{axis}_in{n}" for axis in AXES for n in (1, 2)]
-    require_signals(logic, *signals)
     flatsat.boot()
     print("\nRotate the flatsat back and forth for the next 20 seconds...")
-    capture = logic.capture(signals, 20.0, samplerate=1_000_000)
+    capture = logic.capture(signals, 20.0)
     signs = {axis: {d > 0 for _, d in bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])} for axis in AXES}
     assert any(s == {True, False} for s in signs.values()), f"no axis was driven both ways: {signs}"
 

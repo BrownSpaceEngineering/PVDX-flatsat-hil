@@ -217,8 +217,10 @@ static void cmd_fault(char **tok, size_t count) {
     error("unknown device or fault mode");
 }
 
-// Everything back to power-on: emulator registers, statistics, faults, outputs at 0 V and dark pixels. Keeps the arm state.
+// Everything back to power-on: emulator registers, statistics, faults, outputs at 0 V and dark pixels, no recording.
+// Keeps the arm state.
 static void reset_all(void) {
+    watch_stop(NULL, 0);
     stxg2_set_fault(STXG2_FAULT_NONE);
     ina226_set_fault(INA226_FAULT_NONE);
     mcp23017_set_fault(MCP23017_FAULT_NONE);
@@ -233,15 +235,15 @@ static void reset_all(void) {
     }
 }
 
-static void cmd_selftest(char **tok, size_t count) {
-    if (count == 2 && strcmp(tok[1], "analog") == 0) {
-        ok_with(selftest_analog);
-    } else if (count == 2 && strcmp(tok[1], "i2c") == 0) {
-        ok_with(selftest_i2c);
-    } else if (count == 2 && strcmp(tok[1], "spi") == 0) {
-        ok_with(selftest_spi);
+static void cmd_watch(char **tok, size_t count) {
+    if (count == 2 && strcmp(tok[1], "start") == 0) {
+        ok_with(watch_start);
+    } else if (count == 2 && strcmp(tok[1], "stop") == 0) {
+        ok_with(watch_stop);
+    } else if (count == 2 && strcmp(tok[1], "get") == 0) {
+        ok_with(watch_get);
     } else {
-        error("usage: selftest <analog|i2c|spi>");
+        error("usage: watch <start|stop|get>");
     }
 }
 
@@ -277,8 +279,8 @@ static void execute(char *text) {
     } else if (strcmp(name, "reset") == 0) {
         reset_all();
         ok();
-    } else if (strcmp(name, "selftest") == 0) {
-        cmd_selftest(tok, count);
+    } else if (strcmp(name, "watch") == 0) {
+        cmd_watch(tok, count);
     } else if (strcmp(name, "bootloader") == 0) {
         analog_out_arm(false);
         ok();

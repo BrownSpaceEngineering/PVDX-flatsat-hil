@@ -1,9 +1,9 @@
 /**
  * platform.c
  *
- * tester/common/tester_platform.h for the Metro M4 Grand Central. The host link is SEGGER RTT channel 0, read and
+ * tester/common/tester_platform.h for the Metro M4 Grand Central. The host link is SEGGER RTT channel 1, read and
  * written by the host through a J-Link on the tester's SWD header (hil/lib/tester.py). The bus hooks are in buses.c,
- * the analog outputs in analog_out.c and the self-tests in selftest.c.
+ * and the analog outputs in analog_out.c.
  */
 
 #include "tester_platform.h"
@@ -15,7 +15,8 @@
 #define UF2_DOUBLE_TAP_ADDR (HSRAM_ADDR + HSRAM_SIZE - 4u)
 #define UF2_DOUBLE_TAP_MAGIC 0xF01669EFu
 
-#define LINK_CHANNEL 0u
+// Not channel 0: SEGGER_RTT_ConfigUp/DownBuffer keep channel 0's name and default buffers
+#define LINK_CHANNEL 1u
 #define LINK_WRITE_TIMEOUT_MS 500u // How long a reply waits for the host to make room before it is dropped
 
 // Big enough for the largest reply (cmd.c REPLY_MAX), so a reply never has to wait for the host to drain the last one

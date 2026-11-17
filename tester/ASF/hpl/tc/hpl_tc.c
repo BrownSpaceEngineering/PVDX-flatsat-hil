@@ -139,8 +139,6 @@ static struct _pwm_hpl_interface _tc_pwm_functions = {
     _tc_pwm_set_irq_state,
 };
 
-static struct _pwm_device *_tc2_dev = NULL;
-
 static struct _pwm_device *_tc6_dev = NULL;
 
 static struct _pwm_device *_tc7_dev = NULL;
@@ -330,14 +328,6 @@ static void tc_pwm_interrupt_handler(struct _pwm_device *device)
 /**
  * \brief TC interrupt handler
  */
-void TC2_Handler(void)
-{
-	tc_pwm_interrupt_handler(_tc2_dev);
-}
-
-/**
- * \brief TC interrupt handler
- */
 void TC6_Handler(void)
 {
 	tc_pwm_interrupt_handler(_tc6_dev);
@@ -378,9 +368,6 @@ static int8_t get_tc_index(const void *const hw)
  */
 static void _tc_init_irq_param(const void *const hw, void *dev)
 {
-	if (hw == TC2) {
-		_tc2_dev = (struct _pwm_device *)dev;
-	}
 	if (hw == TC6) {
 		_tc6_dev = (struct _pwm_device *)dev;
 	}

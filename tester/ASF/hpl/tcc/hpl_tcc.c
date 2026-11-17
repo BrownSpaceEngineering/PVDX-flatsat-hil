@@ -81,7 +81,7 @@ static struct tcc_cfg *_get_tcc_cfg(void *hw);
 /**
  * \brief Array of TCC configurations
  */
-static struct tcc_cfg _cfgs[5] = {
+static struct tcc_cfg _cfgs[2] = {
     {(void *)TCC0,
      TCC0_0_IRQn,
      CONF_TCC0_CTRLA,
@@ -109,48 +109,6 @@ static struct tcc_cfg _cfgs[5] = {
      0,
      0,
      CONF_TCC1_PER},
-
-    {(void *)TCC2,
-     TCC2_0_IRQn,
-     CONF_TCC2_CTRLA,
-     CONF_TCC2_CTRLB,
-     CONF_TCC2_DBGCTRL,
-     CONF_TCC2_EVCTRL,
-     CONF_TCC2_CC0,
-     CONF_TCC2_CC1,
-     CONF_TCC2_CC2,
-     0,
-     0,
-     0,
-     CONF_TCC2_PER},
-
-    {(void *)TCC3,
-     TCC3_0_IRQn,
-     CONF_TCC3_CTRLA,
-     CONF_TCC3_CTRLB,
-     CONF_TCC3_DBGCTRL,
-     CONF_TCC3_EVCTRL,
-     CONF_TCC3_CC0,
-     CONF_TCC3_CC1,
-     0,
-     0,
-     0,
-     0,
-     CONF_TCC3_PER},
-
-    {(void *)TCC4,
-     TCC4_0_IRQn,
-     CONF_TCC4_CTRLA,
-     CONF_TCC4_CTRLB,
-     CONF_TCC4_DBGCTRL,
-     CONF_TCC4_EVCTRL,
-     CONF_TCC4_CC0,
-     CONF_TCC4_CC1,
-     0,
-     0,
-     0,
-     0,
-     CONF_TCC4_PER},
 };
 
 /**
@@ -165,7 +123,7 @@ static struct tcc_pwm_cfg *_get_tcc_pwm_cfg(void *hw);
 /**
  * \brief Array of PWM configurations
  */
-static struct tcc_pwm_cfg _cfgs_pwm[5] = {
+static struct tcc_pwm_cfg _cfgs_pwm[2] = {
     {(void *)TCC0,
      TCC0_0_IRQn,
      CONF_TCC0_SEL_CH,
@@ -178,24 +136,6 @@ static struct tcc_pwm_cfg _cfgs_pwm[5] = {
      CONF_TCC1_PER_REG,
      CONF_TCC1_CCX_REG,
      (CONF_TCC1_WAVEGEN << TCC_WAVE_WAVEGEN_Pos)},
-    {(void *)TCC2,
-     TCC2_0_IRQn,
-     CONF_TCC2_SEL_CH,
-     CONF_TCC2_PER_REG,
-     CONF_TCC2_CCX_REG,
-     (CONF_TCC2_WAVEGEN << TCC_WAVE_WAVEGEN_Pos)},
-    {(void *)TCC3,
-     TCC3_0_IRQn,
-     CONF_TCC3_SEL_CH,
-     CONF_TCC3_PER_REG,
-     CONF_TCC3_CCX_REG,
-     (CONF_TCC3_WAVEGEN << TCC_WAVE_WAVEGEN_Pos)},
-    {(void *)TCC4,
-     TCC4_0_IRQn,
-     CONF_TCC4_SEL_CH,
-     CONF_TCC4_PER_REG,
-     CONF_TCC4_CCX_REG,
-     (CONF_TCC4_WAVEGEN << TCC_WAVE_WAVEGEN_Pos)},
 };
 /* Renamed access REG name PERB -> PERBUF */
 #define hri_tcc_write_PERB_reg hri_tcc_write_PERBUF_reg
@@ -208,12 +148,6 @@ static struct tcc_pwm_cfg _cfgs_pwm[5] = {
 static struct _pwm_device *_tcc0_dev = NULL;
 
 static struct _pwm_device *_tcc1_dev = NULL;
-
-static struct _pwm_device *_tcc2_dev = NULL;
-
-static struct _pwm_device *_tcc3_dev = NULL;
-
-static struct _pwm_device *_tcc4_dev = NULL;
 
 /**
  * \brief Set of pointer to hal_pwm helper functions
@@ -240,15 +174,6 @@ static void _tcc_init_irq_param(const void *const hw, void *dev)
 	}
 	if (hw == TCC1) {
 		_tcc1_dev = (struct _pwm_device *)dev;
-	}
-	if (hw == TCC2) {
-		_tcc2_dev = (struct _pwm_device *)dev;
-	}
-	if (hw == TCC3) {
-		_tcc3_dev = (struct _pwm_device *)dev;
-	}
-	if (hw == TCC4) {
-		_tcc4_dev = (struct _pwm_device *)dev;
 	}
 }
 /**
@@ -457,30 +382,6 @@ void TCC0_0_Handler(void)
 void TCC1_0_Handler(void)
 {
 	tcc_pwm_interrupt_handler(_tcc1_dev);
-}
-
-/**
- * \brief TCC interrupt handler
- */
-void TCC2_0_Handler(void)
-{
-	tcc_pwm_interrupt_handler(_tcc2_dev);
-}
-
-/**
- * \brief TCC interrupt handler
- */
-void TCC3_0_Handler(void)
-{
-	tcc_pwm_interrupt_handler(_tcc3_dev);
-}
-
-/**
- * \brief TCC interrupt handler
- */
-void TCC4_0_Handler(void)
-{
-	tcc_pwm_interrupt_handler(_tcc4_dev);
 }
 
 static struct tcc_cfg *_get_tcc_cfg(void *hw)

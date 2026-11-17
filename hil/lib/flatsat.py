@@ -37,6 +37,7 @@ class Flatsat:
         self.jlink = open_jlink(serial_number)
         self.lock = threading.Lock()  # pylink is not thread safe
         self.rtt = RttLink(self.jlink, control_block_address(elf), self.lock)
+        self.read_lock = threading.Lock()  # Held from reading log data to adding it to self.lines
         self.lines = []
         self.partial = ""
         self.lines_lock = threading.Lock()
@@ -44,6 +45,11 @@ class Flatsat:
         self.running = True
         self.reader = threading.Thread(target=self._read_loop, daemon=True)
         self.reader.start()
+
+    def vdd(self):
+        """The flatsat's supply voltage, which the J-Link measures on its VTref pin."""
+        with self.lock:
+            return self.jlink.hardware_status.voltage / 1000.0
 
     def close(self):
         self.running = False
@@ -55,15 +61,17 @@ class Flatsat:
 
     def _read_loop(self):
         while self.running:
-            try:
-                data = self.rtt.read(LOG_CHANNEL)
-            except pylink.errors.JLinkException:
-                data = b""
+            with self.read_lock:
+                try:
+                    data = self.rtt.read(LOG_CHANNEL)
+                except pylink.errors.JLinkException:
+                    data = None
+                if data:
+                    self._add(ANSI.sub("", data.decode("ascii", "replace")))
+            if data is None:
                 time.sleep(0.2)
-            if data:
-                self._add(ANSI.sub("", data.decode("ascii", "replace")))
-            else:
-                time.sleep(0.02)
+            elif not data:
+                time.sleep(0.002)  # The flatsat drops whole log lines when its buffer (SEGGER_RTT_LOG_BUFFER_SIZE) is full
 
     def _add(self, text):
         now = time.monotonic()
@@ -119,7 +127,13 @@ class Flatsat:
 
     def reset(self):
         """Resets the board and returns a log mark from just before the new boot."""
-        mark = self.mark()
+        # Halt, then take in what the old boot logged that hasn't been read yet, so the mark is after all of it
+        with self.lock:
+            self.jlink.halt()
+        with self.read_lock:
+            while data := self.rtt.read(LOG_CHANNEL):
+                self._add(ANSI.sub("", data.decode("ascii", "replace")))
+            mark = self.mark()
         with self.lock:
             self.jlink.reset(halt=True)
             self.jlink.restart()

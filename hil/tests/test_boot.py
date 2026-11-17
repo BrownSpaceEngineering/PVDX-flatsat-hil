@@ -1,10 +1,11 @@
-"""Startup device checks with the S-band radio and perovskite board emulated, and how boot copes when they misbehave."""
+"""Startup device checks with the S-band radio emulated and the analog inputs driven, and how boot copes when the
+emulated S-band radio or perovskite board misbehaves."""
 
 import pytest
 
-from conftest import set_environment
+from conftest import DARK, set_environment
 
-EMULATED = ["SBAND_ID", "PEROVSKITE_ID", "PHOTODIODE_ID", "THERMISTOR_ID"]
+RIG_DEVICES = ["SBAND_ID", "PEROVSKITE_ID", "PHOTODIODE_ID", "THERMISTOR_ID"]  # Emulated, or fed by the tester
 
 
 def booted_to_scheduler(flatsat, since, timeout=30):
@@ -13,10 +14,10 @@ def booted_to_scheduler(flatsat, since, timeout=30):
     return len(flatsat.find_all(r"Built from commit", since)) == 1
 
 
-def test_emulated_devices_pass_their_checks(nominal, flatsat):
+def test_rig_devices_pass_their_checks(nominal, flatsat):
     mark = flatsat.boot()
     checks = flatsat.device_checks(mark)
-    failed = [d for d in EMULATED if not checks.get(d)]
+    failed = [d for d in RIG_DEVICES if not checks.get(d)]
     assert not failed, f"device checks failed: {failed} (all: {checks})"
 
 
@@ -42,6 +43,7 @@ def test_sband_fault_fails_its_check_and_boot_continues(nominal, flatsat, mode, 
     ],
 )
 def test_perovskite_board_fault_fails_its_check(nominal, flatsat, device, mode, warning):
+    """Needs the emulated perovskite board on I2C_SENSORS (hil/README.md)."""
     nominal.fault(device, mode)
     mark = flatsat.boot()
     assert flatsat.device_checks(mark).get("PEROVSKITE_ID") is False
@@ -50,7 +52,8 @@ def test_perovskite_board_fault_fails_its_check(nominal, flatsat, device, mode, 
 
 
 def test_hung_sensor_bus_does_not_hang_the_flatsat(nominal, flatsat):
-    """A perovskite-board device holding SCL low hangs I2C_SENSORS, which the real fuel gauges and camera share."""
+    """An emulated perovskite-board device holding SCL low hangs I2C_SENSORS, which the real fuel gauges and camera
+    share."""
     nominal.fault("pmb_bus", "hold_bus")
     mark = flatsat.reset()
     flatsat.expect(r"AT_LEAST_ONE_DEVICE_FAILED", timeout=90, since=mark)
@@ -63,8 +66,8 @@ def test_hung_sensor_bus_does_not_hang_the_flatsat(nominal, flatsat):
 
 
 def test_dark_and_cold_environment_boots(tester, flatsat):
-    """Eclipse at -20 C with dark pixels: photodiodes only warn, and nothing stops the boot."""
-    set_environment(tester, sun=None, temps_c=(-20.0,) * 4, pixels=False)
+    """Eclipse at -20 C with dark cells and pixels: photodiodes only warn, and nothing stops the boot."""
+    set_environment(tester, photodiodes=DARK, temps_c=(-20.0,) * 4, pvds=DARK, pixels=False)
     mark = flatsat.boot()
     checks = flatsat.device_checks(mark)
     assert checks.get("PHOTODIODE_ID"), "a dark array should pass its check (eclipse is normal)"

@@ -23,9 +23,13 @@ typedef struct {
     volatile bool first_byte;
     volatile bool hold_bus;
     volatile uint8_t addr;
+    volatile uint32_t last_activity_ms;
+    uint8_t addr0, addr1;
+    uint8_t scl_pin;
     volatile uint32_t transactions;
     volatile uint32_t nacks;
     volatile uint32_t bus_errors;
+    volatile uint32_t recoveries;
 } i2c_slave_t;
 
 // addr1 = 0 answers addr0 only. sda and scl are ASF PINMUX_ values for the SERCOM's PAD0 and PAD1.
@@ -33,5 +37,7 @@ void i2c_slave_init(i2c_slave_t *s, Sercom *sercom, uint32_t sda, uint32_t scl, 
                     const i2c_slave_ops_t *ops, void *ctx);
 // While held, the next address match stretches SCL indefinitely (a hung device)
 void i2c_slave_hold_bus(i2c_slave_t *s, bool hold);
+// Call from the main loop: lets go of a bus the master abandoned mid-transaction (see i2c_slave.c)
+void i2c_slave_poll(i2c_slave_t *s);
 
 #endif // I2C_SLAVE_H

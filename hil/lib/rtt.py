@@ -19,7 +19,8 @@ from paths import HIL_REPO, PVDX
 DEVICE = "ATSAMD51P20A"
 FLATSAT_ELF = os.path.join(PVDX, "src", "PVDXos.elf")
 TESTER_ELF = os.path.join(HIL_REPO, "tester", "tester.elf")
-TESTER_CHANNEL_NAME = b"PVDX tester"  # tester/src/platform.c
+TESTER_LINK_CHANNEL = 1  # tester/src/platform.c
+TESTER_CHANNEL_NAME = b"PVDX tester"
 
 
 def control_block_address(elf):
@@ -32,7 +33,9 @@ def control_block_address(elf):
 
 
 def open_jlink(serial_number=None):
-    jlink = pylink.JLink()
+    # Each probe gets its own copy of the J-Link library: on macOS and Linux pylink otherwise loads one shared copy,
+    # which holds a single connection, so the flatsat's and the tester's probes couldn't be open at once
+    jlink = pylink.JLink(lib=pylink.Library(use_tmpcpy=True))
     jlink.open(serial_no=serial_number) if serial_number else jlink.open()
     jlink.set_tif(pylink.enums.JLinkInterfaces.SWD)
     jlink.set_speed(4000)
@@ -47,13 +50,22 @@ class RttLink:
         self.lock = lock or threading.Lock()  # pylink is not thread safe
 
     def _header(self):
-        header = bytes(self.jlink.memory_read8(self.cb, 24))
+        header = self._read_bytes(self.cb, 24)
         if header[:10] != b"SEGGER RTT":
             return None  # Not set up yet after a reset
         return struct.unpack_from("<II", header, 16)  # (up buffers, down buffers)
 
+    def _read_bytes(self, address, count):
+        """count bytes of target memory, read as aligned 32-bit words. The target updates each buffer offset with one
+        32-bit store, which a byte-wise read can catch halfway (a torn offset makes a whole buffer of old data look new,
+        or skips data); word reads are also about 4x faster."""
+        start = address & ~3
+        words = (address + count - start + 3) // 4
+        data = struct.pack(f"<{words}I", *self.jlink.memory_read32(start, words))
+        return data[address - start:address - start + count]
+
     def _descriptor(self, offset):
-        return struct.unpack("<IIIIII", bytes(self.jlink.memory_read8(self.cb + offset, 24)))
+        return struct.unpack("<IIIIII", self._read_bytes(self.cb + offset, 24))
 
     def read(self, channel):
         """Everything waiting in up buffer `channel` (target to host); b"" if none or not set up."""
@@ -67,9 +79,9 @@ class RttLink:
                 return b""
             n = (wr - rd) % size
             first = min(n, size - rd)
-            data = bytes(self.jlink.memory_read8(buf + rd, first))
+            data = self._read_bytes(buf + rd, first)
             if n > first:
-                data += bytes(self.jlink.memory_read8(buf, n - first))
+                data += self._read_bytes(buf, n - first)
             self.jlink.memory_write32(self.cb + offset + 16, [wr])
             return data
 
@@ -112,12 +124,23 @@ def _env_serial(name):
     return int(value) if value else None
 
 
+def _runs_tester(serial):
+    """Whether the target on this J-Link has the tester's RTT channel (False without a built tester.elf)."""
+    if not os.path.exists(TESTER_ELF):
+        return False
+    jlink = open_jlink(serial)
+    try:
+        return RttLink(jlink, control_block_address(TESTER_ELF)).channel_name(TESTER_LINK_CHANNEL) == TESTER_CHANNEL_NAME
+    finally:
+        jlink.close()
+
+
 @functools.cache  # Identifying the probes connects to each; once per test run is enough
 def probe_serials():
-    """(flatsat J-Link serial, tester J-Link serial or None).
+    """(flatsat J-Link serial or None, tester J-Link serial or None).
 
-    HIL_FLATSAT_JLINK and HIL_TESTER_JLINK set them. Otherwise, with one J-Link it is the flatsat's (and there is no
-    tester); with two, the tester's is the one whose target has the tester's RTT channel.
+    HIL_FLATSAT_JLINK and HIL_TESTER_JLINK set them. Otherwise the tester's is the one whose target has the tester's
+    RTT channel, so with one J-Link it is the tester's (flatsat None) or the flatsat's (tester None).
     """
     flatsat, tester = _env_serial("HIL_FLATSAT_JLINK"), _env_serial("HIL_TESTER_JLINK")
     if flatsat and tester:
@@ -126,8 +149,8 @@ def probe_serials():
     if not serials:
         raise ProbeError("no J-Link connected")
     if len(serials) == 1:
-        if tester == serials[0]:
-            raise ProbeError("only the tester's J-Link is connected")
+        if tester == serials[0] or (not flatsat and _runs_tester(serials[0])):
+            return None, serials[0]
         return serials[0], None
     if flatsat or tester:
         others = [s for s in serials if s not in (flatsat, tester)]
@@ -136,15 +159,7 @@ def probe_serials():
         return (flatsat, others[0]) if flatsat else (others[0], tester)
     if not os.path.exists(TESTER_ELF):
         raise ProbeError(f"two J-Links but no {TESTER_ELF} to identify the tester by; build it or set the env vars")
-    cb = control_block_address(TESTER_ELF)
-    testers = []
-    for serial in serials:
-        jlink = open_jlink(serial)
-        try:
-            if RttLink(jlink, cb).channel_name(0) == TESTER_CHANNEL_NAME:
-                testers.append(serial)
-        finally:
-            jlink.close()
+    testers = [s for s in serials if _runs_tester(s)]
     if len(testers) != 1 or len(serials) != 2:
         raise ProbeError(f"J-Links {serials}, tester found on {testers}: set HIL_FLATSAT_JLINK and HIL_TESTER_JLINK")
     return next(s for s in serials if s != testers[0]), testers[0]

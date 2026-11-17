@@ -2,7 +2,7 @@
  * board.h
  *
  * The tester's (Metro M4 Grand Central, ATSAMD51P20A) pins and clocks that its own code uses: the I2C targets' pins,
- * and the PWM and DAC outputs it connects and disconnects (analog_out.c). Everything else is in the Atmel START project
+ * and the PWM outputs it connects and disconnects (analog_out.c). Everything else is in the Atmel START project
  * (ASF/atmel_start_pins.h). Pins are ASF PINMUX_ values, which carry both the pin and its peripheral function; the
  * Grand Central header label is in brackets. hil/README.md has the whole table from the flatsat's side.
  */
@@ -38,7 +38,7 @@
 #define GCLK_CPU 0u  // DPLL0, 120 MHz: CPU, TCC/TC PWM
 #define GCLK_48M 1u  // DFLL, 48 MHz (open loop): SERCOM, ADC
 #define GCLK_1M 2u   // DFLL / 48: DPLL0 reference
-#define GCLK_12M 3u  // DFLL / 4: DAC (12 MHz maximum)
+#define GCLK_12M 3u  // DFLL / 4: unused (it clocked the DAC)
 #define GCLK_32K 4u  // OSCULP32K: SERCOM slow clock
 
 void systick_init(void);

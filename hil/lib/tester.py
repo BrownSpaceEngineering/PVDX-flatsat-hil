@@ -5,9 +5,9 @@ Every command is one line; every reply is one JSON object with "ok". The command
     ping                               firmware name, protocol version, uptime
     arm / disarm                       connect / disconnect (high impedance) every analog output
     out get                            setpoints in mV, armed state, full scale
-    out set <name|all> <volts>         name is phd0..phd17 or therm0..therm3 (those this tester drives)
+    out set <name|all> <volts>         name is phd0..phd3, pvd0..pvd3 or therm0..therm3
     out fullscale <volts>              output voltage at 100% (the tester measures or assumes it)
-    pixel get                          [isc_ua, voc_mv] for each of the 16 perovskite pixels
+    pixel get                          [isc_ua, voc_mv] for each of the 16 emulated perovskite pixels
     pixel set <0-15|all> <isc_ua> <voc_mv>
     pmb get                            MCP23017 / INA226 emulator state, PVD_CRNT voltage
     pmb log <from>                     CURRENT register reads the flatsat made: [selected mask, follower mV, nA]
@@ -15,7 +15,7 @@ Every command is one line; every reply is one JSON object with "ok". The command
     fault <device> <mode>              stxg2 none|nack|bad_id|hold_bus, ina226 none|nack|no_cvrf|bad_id,
                                        mcp23017 none|nack|stuck, pmb_bus none|hold_bus
     reset                              emulators to power-on, faults cleared, outputs 0 V, pixels dark
-    selftest analog|i2c|spi            see tester/src/selftest.c for the jumpers each needs
+    watch start|stop|get               record the flatsat's digital outputs: edges stream on RTT channel 2 (lib/logic.py)
     bootloader                         reboot into the UF2 bootloader (Grand Central only)
 
 The tester disconnects its outputs after 10 s without a command; this client pings it every few seconds while open.
@@ -27,11 +27,14 @@ import time
 
 import rtt
 
-PHOTODIODE_COUNT = 18
-THERMISTOR_COUNT = 4
-PIXEL_COUNT = 16
+PHOTODIODE_CHANNELS = (0, 5, 10, 15)  # phdN drives the flatsat's PHD_<PHOTODIODE_CHANNELS[N]>
+THERMISTOR_COUNT = 4  # therm0-3 drive THERM_0-3
+PIXEL_COUNT = 16  # Pixels of the emulated perovskite board
+PVD_PIXELS = (0, 5, 10, 15)  # pvdN is a cell on perovskite board pixel PVD_PIXELS[N] (PIXEL<N+1>+ on its J5)
+PVD_SERIES_OHMS = 10_000  # The resistor between each pvd output and its pixel
 KEEPALIVE_S = 3.0
-LINK_CHANNEL = 0  # RTT channel of the Grand Central tester's command link
+LINK_CHANNEL = rtt.TESTER_LINK_CHANNEL
+EDGE_CHANNEL = 2  # tester/src/watch.c
 
 
 class TesterError(RuntimeError):
@@ -59,6 +62,15 @@ class RttTransport:
             time.sleep(0.005)
         return data
 
+    def read_edges(self):
+        """Edge records the tester has sent since the last call (b"" if none)."""
+        return self.link.read(EDGE_CHANNEL)
+
+    def vdd(self):
+        """The tester's supply voltage, which the J-Link measures on its VTref pin."""
+        with self.link.lock:
+            return self.jlink.hardware_status.voltage / 1000.0
+
     def close(self):
         with self.link.lock:
             self.jlink.close()
@@ -83,7 +95,7 @@ class Tester:
         self.last_command = time.monotonic()
         self.running = True
         self.firmware = self.ping()["firmware"]
-        self.driven = set(self.outputs()["volts"])  # Analog outputs this tester has
+        self.full_scale = self.outputs()["full_scale_mv"] / 1000.0
         self.keepalive = threading.Thread(target=self._keepalive, daemon=True)
         self.keepalive.start()
 
@@ -137,33 +149,45 @@ class Tester:
     def reset(self):
         self.command("reset")
 
+    def vdd(self):
+        return self.transport.vdd()
+
+    def read_edges(self):
+        return self.transport.read_edges()
+
+    def set_full_scale(self, volts):
+        """The output voltage at 100% duty; the tester's own supply unless scaled to the flatsat's."""
+        self.command(f"out fullscale {volts:.4f}")
+        self.full_scale = volts
+
     def set_output(self, name, volts):
         self.command(f"out set {name} {volts:.4f}")
 
-    def drives(self, name):
-        return name in self.driven
-
     def set_photodiodes(self, volts):
-        """volts: 18 values, PHD_0 first. Returns what the flatsat actually gets: 0 V on any this tester doesn't drive."""
-        assert len(volts) == PHOTODIODE_COUNT
-        applied = []
+        """volts: one per PHOTODIODE_CHANNELS."""
+        assert len(volts) == len(PHOTODIODE_CHANNELS)
         for i, v in enumerate(volts):
-            if self.drives(f"phd{i}"):
-                self.set_output(f"phd{i}", v)
-                applied.append(v)
-            else:
-                applied.append(0.0)
-        return applied
+            self.set_output(f"phd{i}", v)
 
     def set_thermistors(self, volts):
+        """volts: THERM_0-3."""
         assert len(volts) == THERMISTOR_COUNT
         for i, v in enumerate(volts):
             self.set_output(f"therm{i}", v)
+
+    def set_pvds(self, vocs):
+        """vocs: the cells on PVD_PIXELS, in volts. Each is PWM averaging its Voc behind PVD_SERIES_OHMS, so it acts like
+        a cell with that Voc and Isc = Voc / R. The voltage is absolute, as the perovskite board measures it, not a
+        fraction of the flatsat's supply like the ADC inputs (conftest.py sets the full scale for those)."""
+        assert len(vocs) == len(PVD_PIXELS)
+        for i, voc in enumerate(vocs):
+            self.set_output(f"pvd{i}", voc * self.full_scale / self.vdd())
 
     def outputs(self):
         return self.command("out get")
 
     def set_pixel(self, pixel, isc_ua, voc_mv):
+        """An emulated perovskite board pixel's IV curve."""
         self.command(f"pixel set {pixel} {isc_ua:.3f} {voc_mv:.3f}")
 
     def pmb(self):
@@ -186,8 +210,6 @@ class Tester:
     def fault(self, device, mode):
         self.command(f"fault {device} {mode}")
 
-    def selftest(self, which):
-        return self.command(f"selftest {which}", timeout=30.0)
 
     def enter_bootloader(self):
         """Reboots into the UF2 bootloader (Grand Central); the link goes away."""

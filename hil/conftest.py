@@ -3,10 +3,10 @@
 - tester:  the Grand Central tester over its own J-Link (hil/lib/tester.py); reset before every test
 - flatsat: the flight computer over its J-Link: reset, RTT log (hil/lib/flatsat.py). With two J-Links plugged in,
            lib/rtt.py tells them apart (or set HIL_FLATSAT_JLINK / HIL_TESTER_JLINK to their serial numbers)
-- logic:   the logic analyzer (hil/lib/logic.py); use require_signals() to skip when a signal isn't wired
-- nominal: a benign environment (sunlit, 20 C, lit perovskite pixels), armed
+- logic:   the flatsat's digital outputs, recorded by the tester (hil/lib/logic.py)
+- nominal: a benign environment (sunlit photodiodes, 20 C, lit perovskite cells and emulated pixels), armed
 
-A fixture whose hardware is missing skips the tests that use it, so `pytest hil -m selftest` runs with only the tester.
+A fixture whose hardware is missing skips the tests that use it.
 """
 
 import os
@@ -24,12 +24,16 @@ import rtt  # noqa: E402
 from flatsat import ELF, Flatsat  # noqa: E402
 from tester import Tester, TesterError  # noqa: E402
 
-NOMINAL_SUN = (1.0, 0.35, 0.25)
+NOMINAL_PHOTODIODE_VOLTS = (1.2, 0.9, 0.6, 0.3)  # Sunlit, distinct per channel
 NOMINAL_TEMP_C = 20.0
+# Voc of the 4 perovskite cells: distinct, inside the perovskite board's 0-1.2 V sweep, and one 0 V (a dark cell, which
+# only sinks current) so both current directions are measured
+NOMINAL_PVD_VOCS = (0.9, 0.6, 0.3, 0.0)
+DARK = (0.0,) * 4  # For photodiodes= or pvds=
 
 
 def nominal_pixel(pixel):
-    """Distinct, plausible IV parameters per pixel, so a mixed-up pixel shows in the currents."""
+    """Distinct, plausible IV parameters per emulated pixel, so a mixed-up pixel shows in the currents."""
     return 40.0 + 8.0 * pixel, 850.0 + 10.0 * pixel  # Isc uA, Voc mV
 
 
@@ -48,7 +52,13 @@ def tester_session():
 
 
 @pytest.fixture
-def tester(tester_session):
+def tester(tester_session, request):
+    # The flatsat's ADCs and DAC measure relative to its own supply, which its firmware takes to be models.VDD. With the
+    # flatsat in the test, the tester's voltages are scaled so that each is that fraction of the flatsat's real supply
+    full_scale = tester_session.vdd()
+    if "flatsat" in request.fixturenames:
+        full_scale *= models.VDD / request.getfixturevalue("flatsat").vdd()
+    tester_session.set_full_scale(full_scale)
     tester_session.reset()
     yield tester_session
     tester_session.reset()
@@ -60,6 +70,8 @@ def flatsat():
         pytest.skip(f"{ELF} not built")
     try:
         flatsat_serial, _ = rtt.probe_serials()
+        if flatsat_serial is None:
+            raise rtt.ProbeError("only the tester's J-Link is connected")
         f = Flatsat(serial_number=flatsat_serial)
     except Exception as e:  # No J-Link, or it can't reach the target
         pytest.skip(f"flatsat not reachable over J-Link: {e}")
@@ -68,21 +80,16 @@ def flatsat():
 
 
 @pytest.fixture(scope="session")
-def logic():
-    return logic_lib.LogicAnalyzer()
+def logic(tester_session):
+    return logic_lib.LogicRecorder(tester_session)
 
 
-def require_signals(logic, *signals):
-    missing = logic.missing(*signals)
-    if missing:
-        pytest.skip(f"logic analyzer channels not mapped in hil/logic_channels.json: {', '.join(missing)}")
-    if not logic.available():
-        pytest.skip("no sigrok-cli or logic analyzer (close PulseView if it holds the device)")
-
-
-def set_environment(tester, sun=NOMINAL_SUN, temps_c=(NOMINAL_TEMP_C,) * 4, pixels=True):
-    tester.set_photodiodes(models.photodiode_volts(sun) if sun is not None else [0.0] * 18)
+def set_environment(tester, photodiodes=NOMINAL_PHOTODIODE_VOLTS, temps_c=(NOMINAL_TEMP_C,) * 4, pvds=NOMINAL_PVD_VOCS,
+                    pixels=True):
+    """pvds: the cells on the real perovskite board; pixels: whether the emulated board's pixels are lit."""
+    tester.set_photodiodes(photodiodes)
     tester.set_thermistors([models.thermistor_volts(t) if t is not None else models.OPEN_VOLTS for t in temps_c])
+    tester.set_pvds(pvds)
     for p in range(16):
         isc, voc = nominal_pixel(p) if pixels else (0.0, 0.0)
         tester.set_pixel(p, isc, voc)
@@ -113,4 +120,4 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_hackrf)
 
 
-__all__ = ["TesterError", "require_signals", "set_environment", "nominal_pixel"]
+__all__ = ["TesterError", "set_environment", "nominal_pixel", "DARK"]

@@ -35,7 +35,7 @@ void platform_hold_stxg2_bus(bool hold);
 // Reboots into the board's bootloader; returns false if the board has none to enter this way
 bool platform_enter_bootloader(void);
 
-// Analog outputs, one per simulated flatsat input the board drives (names phd0..phd17, therm0..therm3)
+// Analog outputs, one per input the board drives (names phd0..phd3, pvd0..pvd3, therm0..therm3)
 uint8_t analog_out_count(void);
 const char *analog_out_name(uint8_t out);
 int analog_out_find(const char *name); // -1 if this board doesn't drive it
@@ -46,11 +46,12 @@ bool analog_out_armed(void);
 void analog_out_set_full_scale(float volts); // Output voltage at 100%, measured by the host
 float analog_out_full_scale(void);
 
-// Self-tests (see each board's selftest code): write JSON object members and return their length, or -1 if the board
-// has no such test
-int selftest_analog(char *buf, size_t len);
-int selftest_i2c(char *buf, size_t len);
-int selftest_spi(char *buf, size_t len);
+// Digital inputs watching the flatsat's outputs (names mtq_{x,y,z}_in{1,2}, mtq_{x,y,z}_slp, heater1, heater2, burn,
+// sband_en, sband_rst). While recording, each edge goes to the host as a binary record on its own channel (on the Grand
+// Central, RTT channel 2; tester/src/watch.c has the format). Each writes the JSON members of its reply.
+int watch_start(char *buf, size_t len); // t_us: the first record's time
+int watch_stop(char *buf, size_t len);  // t_us, records (sent to the host in all), dropped
+int watch_get(char *buf, size_t len);   // lines {name: line number in the records}, levels {name: 0|1}
 
 #ifdef __cplusplus
 }

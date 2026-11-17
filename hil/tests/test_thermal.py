@@ -2,13 +2,13 @@
 
 Heater 1 follows thermistors 0 and 1, heater 2 follows 2 and 3. It turns on at or below HEATER_ON_C and off at or above
 HEATER_OFF_C, and keeps its state in between. A thermistor that reads open, or far from the others, is replaced by its
-pair partner. The heater lines are checked on the logic analyzer when heater1/heater2 are mapped, and in the log.
+pair partner. The heater lines are checked in the tester's recording of them, and in the log.
 """
 
 import pytest
 
 import models
-from conftest import require_signals, set_environment
+from conftest import set_environment
 
 THERMISTOR_TASK_TODO = pytest.mark.xfail(
     reason="no state enables the thermistor task yet, so it never runs (TODO in src/states.c)", strict=False)
@@ -21,7 +21,7 @@ def test_device_check_reads_the_simulated_temperatures(tester, flatsat):
     set_environment(tester, temps_c=temps)
     mark = flatsat.boot()
     logged = {int(m.group(1)): int(m.group(2)) / 1000.0
-              for m in flatsat.find_all(r"thermistor check: T(\d) code \d+ -> (-?\d+) mC", mark)}
+              for m in flatsat.find_all(r"thermistor check: T(\d) code \d+ -> (-?\d+) mC$", mark)}
     assert sorted(logged) == [0, 1, 2, 3], f"thermistor check logged {logged}"
     errors = {i: round(logged[i] - t, 2) for i, t in enumerate(temps) if abs(logged[i] - t) > CHECK_TOLERANCE_C}
     assert not errors, f"thermistors off by more than {CHECK_TOLERANCE_C} C: {errors}"
@@ -71,9 +71,8 @@ def test_open_thermistor_is_replaced_by_its_partner(tester, flatsat):
 
 @THERMISTOR_TASK_TODO
 def test_heater_line_matches_the_logged_state(tester, flatsat, logic):
-    require_signals(logic, "heater1")
     set_environment(tester, temps_c=(0.0, 0.0, 20.0, 20.0))
     flatsat.boot()
-    pending = logic.start(["heater1"], seconds=3 * TASK_PERIOD_S, samplerate=100_000)
+    pending = logic.start(["heater1"], seconds=3 * TASK_PERIOD_S)
     capture = pending.wait()
     assert capture["heater1"].duty() > 0.99, "heater 1 should be on for the whole capture"

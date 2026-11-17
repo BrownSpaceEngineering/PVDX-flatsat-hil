@@ -76,6 +76,8 @@ void buses_init(void) {
 }
 
 void buses_poll(void) {
+    i2c_slave_poll(&pmb_i2c);
+    i2c_slave_poll(&stxg2_i2c);
     pmb_set_pvd_crnt(analog_in_read_pvd_crnt(analog_out_full_scale()));
 }
 

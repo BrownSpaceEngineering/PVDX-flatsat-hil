@@ -2,7 +2,6 @@
 
 import pytest
 
-from conftest import require_signals
 
 POWER_SETTLE_S = 0.100  # STXG2_POWER_SETTLE_MS: EN high to RST high
 SCRATCH_PATTERN = 0xB5E0CAFE
@@ -19,8 +18,7 @@ def test_device_check_talks_to_the_radio(nominal, flatsat):
 
 def test_power_sequencing(nominal, flatsat, logic):
     """EN rises, RST is held low for STXG2_POWER_SETTLE_MS, then released; power-off drops both."""
-    require_signals(logic, "sband_en", "sband_rst")
-    pending = logic.start(["sband_en", "sband_rst"], seconds=15.0, samplerate=100_000)
+    pending = logic.start(["sband_en", "sband_rst"], seconds=15.0)
     mark = flatsat.reset()
     capture = pending.wait()
     flatsat.expect(r"SBAND_ID\s*:", timeout=30, since=mark)

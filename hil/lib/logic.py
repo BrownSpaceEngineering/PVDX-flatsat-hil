@@ -1,29 +1,17 @@
-"""The flatsat's digital outputs through a sigrok logic analyzer (fx2lafw, see the capture-samd51-logic-analyzer skill).
+"""The flatsat's digital outputs, recorded by the tester (tester/src/watch.c) in place of a logic analyzer.
 
-Which analyzer channel watches which flatsat signal is set in hil/logic_channels.json ({"mtq_x_in1": "D0", ...}),
-since an 8-channel analyzer can't watch every output at once. Tests ask for signals by name and skip when one isn't
-wired. Signal names: mtq_{x,y,z}_in{1,2}, mtq_{x,y,z}_slp, heater1, heater2, burn, sband_en, sband_rst.
-
-Captures run sigrok-cli in the background and are read back as VCD, which lists only the transitions.
+Signal names: mtq_{x,y,z}_in{1,2}, mtq_{x,y,z}_slp, heater1, heater2, burn, sband_en, sband_rst. All are wired at once
+(hil/README.md). While recording, the tester sends one 8-byte record per edge on RTT channel 2: the time in us, the
+level of every input and which inputs had an edge. A capture turns them into each signal's transitions.
 """
 
-import json
-import os
-import shutil
-import subprocess
-import tempfile
+import struct
+import threading
 import time
 
-CONFIG = os.path.join(os.path.dirname(__file__), "..", "logic_channels.json")
-DRIVER = os.environ.get("HIL_LOGIC_DRIVER", "fx2lafw")
-START_DELAY_S = 1.5  # sigrok-cli takes about a second to open the device and start sampling
-
-
-def load_channel_map(path=CONFIG):
-    if not os.path.exists(path):
-        return {}
-    with open(path) as f:
-        return {signal: channel for signal, channel in json.load(f).items() if not signal.startswith("_") and channel}
+RECORD = struct.Struct("<IHH")  # t_us, levels, edges
+DRAIN_QUIET_S = 0.05  # How long the edge channel must stay empty to count as drained
+STOP_TIMEOUT_S = 10.0  # For the last records to arrive after stopping
 
 
 class Signal:
@@ -88,90 +76,101 @@ class Capture:
         return self.signals[name]
 
 
-def parse_vcd(text, channel_to_signal, duration):
-    timescale_s = 1e-12
-    ids = {}
-    initial = {}
-    changes = {}
-    now = 0.0
-    in_header = True
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        if in_header:
-            if line.startswith("$timescale"):
-                value = line.split()[1] if len(line.split()) > 2 else "1"
-                units = {"s": 1, "ms": 1e-3, "us": 1e-6, "ns": 1e-9, "ps": 1e-12}
-                number = "".join(c for c in value if c.isdigit()) or "1"
-                unit = value[len(number):] or line.split()[2]
-                timescale_s = int(number) * units[unit]
-            elif line.startswith("$var"):
-                parts = line.split()
-                ids[parts[3]] = parts[4]  # identifier -> channel name (D0...)
-            elif line.startswith("$enddefinitions"):
-                in_header = False
-            continue
-        for token in line.split():  # sigrok writes "#<time> <value><id> ..." on one line
-            if token[0] == "#":
-                now = int(token[1:]) * timescale_s
-            elif token[0] in "01" and token[1:] in ids:
-                channel = ids[token[1:]]
-                level = int(token[0])
-                if channel not in initial:
-                    initial[channel] = level
-                else:
-                    changes.setdefault(channel, []).append((now, level))
+class CaptureError(RuntimeError):
+    pass
+
+
+def build_signals(records, lines, names, t0_us, duration):
+    """Each named signal's transitions from the records, in seconds from t0_us. An edge flag with no change of level
+    was a pulse shorter than the tester's interrupt latency: it becomes a zero-width pulse."""
     signals = {}
-    for channel, name in channel_to_signal.items():
-        events = changes.get(channel, [])
-        signals[name] = Signal(name, initial.get(channel, 0), [t for t, _ in events], [lv for _, lv in events], duration)
+    for name in names:
+        bit = 1 << lines[name]
+        initial = 1 if records[0][1] & bit else 0
+        level, times, levels = initial, [], []
+        for t_us, record_levels, edges in records[1:]:
+            t = ((t_us - t0_us) & 0xFFFFFFFF) / 1e6
+            now = 1 if record_levels & bit else 0
+            if now != level:
+                times.append(t)
+                levels.append(now)
+            elif edges & bit:
+                times += [t, t]
+                levels += [1 - now, now]
+            level = now
+        signals[name] = Signal(name, initial, times, levels, duration)
     return signals
 
 
 class PendingCapture:
-    def __init__(self, process, path, channel_to_signal, duration, workdir):
-        self.process = process
-        self.path = path
-        self.channel_to_signal = channel_to_signal
-        self.duration = duration
-        self.workdir = workdir
+    """A recording running in the background; wait() returns its Capture."""
+
+    def __init__(self, tester, names, lines, seconds):
+        self.tester = tester
+        self.names = names
+        self.lines = lines
+        self.seconds = seconds
+        self.data = bytearray()
+        self.error = None
+        self.result = None
+        self.t0_us = tester.command("watch start")["t_us"]
+        self.thread = threading.Thread(target=self._run, daemon=True)
+        self.thread.start()
+
+    def _run(self):
+        try:
+            end = time.monotonic() + self.seconds
+            while time.monotonic() < end:
+                self._read()
+            stop = self.tester.command("watch stop")
+            deadline = time.monotonic() + STOP_TIMEOUT_S
+            while len(self.data) < stop["records"] * RECORD.size and time.monotonic() < deadline:
+                self._read()
+            if stop["dropped"]:
+                raise CaptureError(f"the tester dropped {stop['dropped']} edges (the host didn't keep up)")
+            if len(self.data) < stop["records"] * RECORD.size:
+                raise CaptureError(f"{len(self.data) // RECORD.size} of {stop['records']} edge records arrived")
+            records = [RECORD.unpack_from(self.data, i) for i in range(0, stop["records"] * RECORD.size, RECORD.size)]
+            duration = ((stop["t_us"] - self.t0_us) & 0xFFFFFFFF) / 1e6
+            self.result = Capture(build_signals(records, self.lines, self.names, self.t0_us, duration), duration)
+        except Exception as e:  # Raised from wait(), in the test
+            self.error = e
+
+    def _read(self):
+        data = self.tester.read_edges()
+        if data:
+            self.data += data
+        else:
+            time.sleep(0.005)
 
     def wait(self):
-        _, err = self.process.communicate(timeout=self.duration + 60)
-        if self.process.returncode != 0:
-            raise RuntimeError(f"sigrok-cli failed: {err.decode(errors='replace')}")
-        with open(self.path) as f:
-            text = f.read()
-        shutil.rmtree(self.workdir, ignore_errors=True)
-        return Capture(parse_vcd(text, self.channel_to_signal, self.duration), self.duration)
+        self.thread.join(self.seconds + STOP_TIMEOUT_S + 30)
+        if self.error:
+            raise self.error
+        if self.result is None:
+            raise CaptureError("the capture didn't finish")
+        return self.result
 
 
-class LogicAnalyzer:
-    def __init__(self, channel_map=None):
-        self.channel_map = load_channel_map() if channel_map is None else channel_map
+class LogicRecorder:
+    """Records the flatsat's outputs with the tester. One capture at a time."""
 
-    @staticmethod
-    def available():
-        if shutil.which("sigrok-cli") is None:
-            return False
-        out = subprocess.run(["sigrok-cli", "--scan"], capture_output=True, text=True).stdout
-        return DRIVER in out
+    def __init__(self, tester):
+        self.tester = tester
+        self.lines = tester.command("watch get")["lines"]  # Signal name -> bit in the records
 
-    def missing(self, *signals):
-        return [s for s in signals if s not in self.channel_map]
+    def start(self, signals, seconds):
+        """Starts recording `signals` for `seconds`; returns once recording has begun. Call .wait() after."""
+        unknown = [s for s in signals if s not in self.lines]
+        if unknown:
+            raise ValueError(f"the tester doesn't watch {unknown}")
+        # Leftovers of an earlier capture that didn't finish
+        self.tester.command("watch stop")
+        quiet_since = time.monotonic()
+        while time.monotonic() - quiet_since < DRAIN_QUIET_S:
+            if self.tester.read_edges():
+                quiet_since = time.monotonic()
+        return PendingCapture(self.tester, list(signals), self.lines, seconds)
 
-    def start(self, signals, seconds, samplerate=1_000_000):
-        """Starts capturing `signals` for `seconds`; returns once sampling has (probably) begun. Call .wait() after."""
-        channel_to_signal = {self.channel_map[s]: s for s in signals}
-        workdir = tempfile.mkdtemp(prefix="hil_logic_")
-        path = os.path.join(workdir, "capture.vcd")
-        process = subprocess.Popen(
-            ["sigrok-cli", "-d", DRIVER, "-c", f"samplerate={samplerate}", "-C", ",".join(channel_to_signal),
-             "--time", str(int(seconds * 1000)), "-O", "vcd", "-o", path],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        time.sleep(START_DELAY_S)
-        return PendingCapture(process, path, channel_to_signal, seconds, workdir)
-
-    def capture(self, signals, seconds, samplerate=1_000_000):
-        return self.start(signals, seconds, samplerate).wait()
+    def capture(self, signals, seconds):
+        return self.start(signals, seconds).wait()

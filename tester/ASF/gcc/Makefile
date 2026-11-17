@@ -33,12 +33,11 @@ SUB_DIRS +=  \
 hpl/adc \
 hpl/tc \
 hpl/osc32kctrl \
+hpl/ramecc \
 hpl/dmac \
-hpl/dac \
 samd51a/gcc/gcc \
 hpl/tcc \
 hal/src \
-hpl/ramecc \
 hpl/mclk \
 samd51a/gcc \
 hal/utils/src \
@@ -57,10 +56,7 @@ hal/src/hal_spi_s_async.o \
 samd51a/gcc/system_samd51.o \
 hpl/core/hpl_core_m4.o \
 hal/utils/src/utils_syscalls.o \
-hpl/mclk/hpl_mclk.o \
-hal/src/hal_spi_m_sync.o \
 hal/src/hal_pwm.o \
-hal/src/hal_i2c_m_sync.o \
 hal/src/hal_delay.o \
 hpl/pm/hpl_pm.o \
 hpl/core/hpl_init.o \
@@ -69,7 +65,7 @@ hal/utils/src/utils_list.o \
 hal/utils/src/utils_assert.o \
 hpl/dmac/hpl_dmac.o \
 hpl/oscctrl/hpl_oscctrl.o \
-hpl/dac/hpl_dac.o \
+hpl/mclk/hpl_mclk.o \
 hpl/ramecc/hpl_ramecc.o \
 hal/src/hal_init.o \
 main.o \
@@ -77,19 +73,18 @@ hpl/osc32kctrl/hpl_osc32kctrl.o \
 examples/driver_examples.o \
 driver_init.o \
 hal/src/hal_adc_sync.o \
-hal/src/hal_dac_sync.o \
 hpl/sercom/hpl_sercom.o \
 hal/utils/src/utils_ringbuffer.o \
-hal/src/hal_atomic.o \
 hal/src/hal_gpio.o \
 hal/utils/src/utils_event.o \
 hal/src/hal_sleep.o \
 hal/src/hal_cache.o \
 hpl/tcc/hpl_tcc.o \
+hpl/cmcc/hpl_cmcc.o \
 samd51a/gcc/gcc/startup_samd51.o \
 atmel_start.o \
 hpl/tc/hpl_tc.o \
-hpl/cmcc/hpl_cmcc.o \
+hal/src/hal_atomic.o \
 hpl/adc/hpl_adc.o
 
 OBJS_AS_ARGS +=  \
@@ -98,10 +93,7 @@ OBJS_AS_ARGS +=  \
 "samd51a/gcc/system_samd51.o" \
 "hpl/core/hpl_core_m4.o" \
 "hal/utils/src/utils_syscalls.o" \
-"hpl/mclk/hpl_mclk.o" \
-"hal/src/hal_spi_m_sync.o" \
 "hal/src/hal_pwm.o" \
-"hal/src/hal_i2c_m_sync.o" \
 "hal/src/hal_delay.o" \
 "hpl/pm/hpl_pm.o" \
 "hpl/core/hpl_init.o" \
@@ -110,7 +102,7 @@ OBJS_AS_ARGS +=  \
 "hal/utils/src/utils_assert.o" \
 "hpl/dmac/hpl_dmac.o" \
 "hpl/oscctrl/hpl_oscctrl.o" \
-"hpl/dac/hpl_dac.o" \
+"hpl/mclk/hpl_mclk.o" \
 "hpl/ramecc/hpl_ramecc.o" \
 "hal/src/hal_init.o" \
 "main.o" \
@@ -118,19 +110,18 @@ OBJS_AS_ARGS +=  \
 "examples/driver_examples.o" \
 "driver_init.o" \
 "hal/src/hal_adc_sync.o" \
-"hal/src/hal_dac_sync.o" \
 "hpl/sercom/hpl_sercom.o" \
 "hal/utils/src/utils_ringbuffer.o" \
-"hal/src/hal_atomic.o" \
 "hal/src/hal_gpio.o" \
 "hal/utils/src/utils_event.o" \
 "hal/src/hal_sleep.o" \
 "hal/src/hal_cache.o" \
 "hpl/tcc/hpl_tcc.o" \
+"hpl/cmcc/hpl_cmcc.o" \
 "samd51a/gcc/gcc/startup_samd51.o" \
 "atmel_start.o" \
 "hpl/tc/hpl_tc.o" \
-"hpl/cmcc/hpl_cmcc.o" \
+"hal/src/hal_atomic.o" \
 "hpl/adc/hpl_adc.o"
 
 # List the directories containing header files
@@ -143,7 +134,6 @@ DIR_INCLUDES +=  \
 -I"../hpl/adc" \
 -I"../hpl/cmcc" \
 -I"../hpl/core" \
--I"../hpl/dac" \
 -I"../hpl/dmac" \
 -I"../hpl/gclk" \
 -I"../hpl/mclk" \
@@ -170,21 +160,18 @@ DEPS_AS_ARGS +=  \
 "hpl/core/hpl_core_m4.d" \
 "hal/utils/src/utils_syscalls.d" \
 "samd51a/gcc/system_samd51.d" \
-"hal/src/hal_i2c_m_sync.d" \
 "hal/utils/src/utils_event.d" \
 "hal/src/hal_pwm.d" \
-"hal/src/hal_spi_m_sync.d" \
 "hal/utils/src/utils_list.d" \
 "hpl/cmcc/hpl_cmcc.d" \
 "hpl/dmac/hpl_dmac.d" \
 "hal/utils/src/utils_assert.d" \
-"hpl/mclk/hpl_mclk.d" \
 "hal/src/hal_delay.d" \
 "hpl/core/hpl_init.d" \
 "hpl/pm/hpl_pm.d" \
 "hpl/gclk/hpl_gclk.d" \
 "hal/src/hal_init.d" \
-"hpl/dac/hpl_dac.d" \
+"hpl/mclk/hpl_mclk.d" \
 "driver_init.d" \
 "hal/src/hal_adc_sync.d" \
 "hpl/osc32kctrl/hpl_osc32kctrl.d" \
@@ -194,7 +181,6 @@ DEPS_AS_ARGS +=  \
 "hal/src/hal_sleep.d" \
 "hal/utils/src/utils_ringbuffer.d" \
 "hpl/sercom/hpl_sercom.d" \
-"hal/src/hal_dac_sync.d" \
 "hal/src/hal_gpio.d" \
 "hal/src/hal_atomic.d" \
 "hpl/tc/hpl_tc.d" \

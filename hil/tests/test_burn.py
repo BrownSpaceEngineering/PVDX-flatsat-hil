@@ -1,4 +1,4 @@
-"""Burn wire sequence in main.c, watched on the logic analyzer ("burn" in hil/logic_channels.json).
+"""Burn wire sequence in main.c, with the burn pin recorded by the tester.
 
 The current firmware forces burn_record.burned = true and has the BURN pin writes commented out (both marked
 BEFORE-FLIGHT), so in an ordinary build the pin must stay low. To test the sequence itself, undo those two and build
@@ -13,7 +13,6 @@ import re
 
 import pytest
 
-from conftest import require_signals
 
 pytestmark = pytest.mark.slow
 
@@ -26,8 +25,7 @@ def burn_settings(flatsat, since):
 
 
 def test_burn_pin_stays_low_once_burned(nominal, flatsat, logic):
-    require_signals(logic, "burn")
-    pending = logic.start(["burn"], seconds=20.0, samplerate=10_000)
+    pending = logic.start(["burn"], seconds=20.0)
     mark = flatsat.reset()
     capture = pending.wait()
     burned, _ = burn_settings(flatsat, mark)
@@ -37,7 +35,6 @@ def test_burn_pin_stays_low_once_burned(nominal, flatsat, logic):
 
 
 def test_burn_fires_once(nominal, flatsat, logic):
-    require_signals(logic, "burn")
     mark = flatsat.reset()
     burned, _ = burn_settings(flatsat, mark)
     if burned:
@@ -46,7 +43,7 @@ def test_burn_fires_once(nominal, flatsat, logic):
     total_wait_s = int(wait.group(1))
     on_line = flatsat.expect(r"Burn pin \(PB29\) on for (\d+) s", timeout=total_wait_s + 90, since=mark)
     on_s = int(on_line.group(1))
-    capture = logic.capture(["burn"], seconds=on_s + 5.0, samplerate=10_000)
+    capture = logic.capture(["burn"], seconds=on_s + 5.0)
     pulses = capture["burn"].pulses()
     high = capture["burn"].high_time()
     flatsat.expect(r"Burn pin \(PB29\) off; burn recorded in MRAM", timeout=on_s + 10, since=mark)

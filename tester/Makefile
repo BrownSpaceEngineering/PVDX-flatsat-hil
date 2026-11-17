@@ -29,45 +29,11 @@ UF2_VOLUME ?= /Volumes/GCM4BOOT
 # Serial number of the tester's J-Link (JLinkExe's ShowEmuList prints it); needed when two J-Links are plugged in
 JLINK_SERIAL ?=
 
-# Everything ASF/gcc/Makefile builds except its example main.c and driver examples
-ASF_SRCS := \
-            $(ASF)/atmel_start.c \
-            $(ASF)/driver_init.c \
-            $(ASF)/hal/src/hal_adc_sync.c \
-            $(ASF)/hal/src/hal_atomic.c \
-            $(ASF)/hal/src/hal_cache.c \
-            $(ASF)/hal/src/hal_dac_sync.c \
-            $(ASF)/hal/src/hal_delay.c \
-            $(ASF)/hal/src/hal_gpio.c \
-            $(ASF)/hal/src/hal_i2c_m_sync.c \
-            $(ASF)/hal/src/hal_init.c \
-            $(ASF)/hal/src/hal_io.c \
-            $(ASF)/hal/src/hal_pwm.c \
-            $(ASF)/hal/src/hal_sleep.c \
-            $(ASF)/hal/src/hal_spi_m_sync.c \
-            $(ASF)/hal/src/hal_spi_s_async.c \
-            $(ASF)/hal/utils/src/utils_assert.c \
-            $(ASF)/hal/utils/src/utils_event.c \
-            $(ASF)/hal/utils/src/utils_list.c \
-            $(ASF)/hal/utils/src/utils_ringbuffer.c \
-            $(ASF)/hal/utils/src/utils_syscalls.c \
-            $(ASF)/hpl/adc/hpl_adc.c \
-            $(ASF)/hpl/cmcc/hpl_cmcc.c \
-            $(ASF)/hpl/core/hpl_core_m4.c \
-            $(ASF)/hpl/core/hpl_init.c \
-            $(ASF)/hpl/dac/hpl_dac.c \
-            $(ASF)/hpl/dmac/hpl_dmac.c \
-            $(ASF)/hpl/gclk/hpl_gclk.c \
-            $(ASF)/hpl/mclk/hpl_mclk.c \
-            $(ASF)/hpl/osc32kctrl/hpl_osc32kctrl.c \
-            $(ASF)/hpl/oscctrl/hpl_oscctrl.c \
-            $(ASF)/hpl/pm/hpl_pm.c \
-            $(ASF)/hpl/ramecc/hpl_ramecc.c \
-            $(ASF)/hpl/sercom/hpl_sercom.c \
-            $(ASF)/hpl/tc/hpl_tc.c \
-            $(ASF)/hpl/tcc/hpl_tcc.c \
-            $(ASF)/samd51a/gcc/gcc/startup_samd51.c \
-            $(ASF)/samd51a/gcc/system_samd51.c
+# Everything ASF/gcc/Makefile builds except its example main.c and driver examples. Wildcards, so a START export that adds
+# or drops drivers needs no change here
+ASF_SRCS := $(ASF)/atmel_start.c $(ASF)/driver_init.c \
+            $(wildcard $(ASF)/hal/src/*.c $(ASF)/hal/utils/src/*.c $(ASF)/hpl/*/*.c) \
+            $(ASF)/samd51a/gcc/gcc/startup_samd51.c $(ASF)/samd51a/gcc/system_samd51.c
 
 SRCS := $(wildcard src/*.c) $(wildcard common/*.c) $(ASF_SRCS) $(RTT)/SEGGER_RTT.c
 
@@ -77,8 +43,8 @@ INCLUDES := -Isrc -Icommon -I$(RTT) $(addprefix -I,$(ASF_INCLUDES))
 
 # Atmel START's clock calculator works out 360 MHz for DPLL0 (GCLK2 = 1 MHz, LDR 119), although the registers it
 # generates give the intended 120 MHz; the frequency constants are #ifndef-guarded, so set them right here
-CLOCK_DEFINES := -DCONF_CPU_FREQUENCY=120000000 $(foreach t,0 1 2 3 4,-DCONF_GCLK_TCC$(t)_FREQUENCY=120000000) \
-                 $(foreach t,2 6 7,-DCONF_GCLK_TC$(t)_FREQUENCY=120000000)
+CLOCK_DEFINES := -DCONF_CPU_FREQUENCY=120000000 $(foreach t,0 1,-DCONF_GCLK_TCC$(t)_FREQUENCY=120000000) \
+                 $(foreach t,6 7,-DCONF_GCLK_TC$(t)_FREQUENCY=120000000)
 
 ARCH := -mthumb -mcpu=cortex-m4 -mfloat-abi=hard -mfpu=fpv4-sp-d16
 CFLAGS := $(ARCH) -std=gnu99 -Os -g3 -ffunction-sections -fdata-sections -Wall -Wextra -Werror \
