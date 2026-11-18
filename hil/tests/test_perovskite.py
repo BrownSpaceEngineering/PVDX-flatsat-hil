@@ -14,7 +14,7 @@ import time
 import numpy as np
 import pytest
 
-from conftest import DARK, NOMINAL_PVD_VOCS, set_environment
+from conftest import DARK, NOMINAL_PVD_VOCS, set_environment, skip_unless_perovskite_board
 from tester import PVD_PIXELS, PVD_SERIES_OHMS
 
 pytestmark = pytest.mark.slow
@@ -27,12 +27,13 @@ STEP_LOG = r"perovskite: px\s+(\d+) step\s+(\d+) set\s+(\d+) mV I\s+(-?\d+) nA"
 CELL_TOLERANCE = 0.05  # Series resistor tolerance, PWM averaging and INA226 gain
 CELL_OFFSET_NA = 2000  # INA226 offset, and the follower sitting a few mV off 0 V while sinking at step 0
 OPEN_PIXEL_NA = 2000  # A pixel with nothing on it
-PIXEL_FULL_SCALE_MV = 1200  # Most a pixel can get: 3.3 V through the PMB's 21k/12k divider
+PIXEL_FULL_SCALE_MV = 1200  # Most a pixel can get: 3.3 V x 12k / (21k + 12k), the PMB's divider
 
 
-def run_sweep(flatsat):
+def run_sweep(tester, flatsat):
     """Boots, waits for one sweep, and returns (flatsat step lines, log mark)."""
     mark = flatsat.boot()
+    skip_unless_perovskite_board(tester, emulated=False)
     flatsat.expect(r"perovskite: Starting sweep", timeout=START_TIMEOUT_S, since=mark)
     flatsat.expect(r"perovskite: (Sweep #\d+ done|Every step failed|Hardware initialization failed)",
                    timeout=SWEEP_TIMEOUT_S, since=mark)
@@ -53,7 +54,7 @@ def test_sweep_measures_the_tester_cells(tester, flatsat):
     pixel reads open. A cell on the wrong pixel shows up as the wrong Voc, and a wrong pixel voltage (such as a
     divider other than the one pvd_dac.h assumes) as the wrong slope."""
     set_environment(tester)
-    steps, mark = run_sweep(flatsat)
+    steps, mark = run_sweep(tester, flatsat)
 
     assert len(steps) == PIXELS * STEPS, f"{len(steps)} steps logged"
     assert [px for px, *_ in steps] == [p for p in range(PIXELS) for _ in range(STEPS)], "pixels out of order"
@@ -81,8 +82,11 @@ def test_sweep_measures_the_tester_cells(tester, flatsat):
 
 
 def test_dark_cells_only_sink_current(tester, flatsat):
-    """With every cell at 0 V the pixels are plain resistors to ground, so no step reads current flowing out."""
+    """With every cell at 0 V the cell pixels are plain resistors to ground, I = -V / R at every step. Checking the
+    whole line, not just the sign, also catches a pvd wire that isn't connected (which reads open, about 0)."""
     set_environment(tester, pvds=DARK)
-    steps, _ = run_sweep(flatsat)
-    sourcing = [(px, step, i) for px, step, _, i in steps if px in PVD_PIXELS and i > CELL_OFFSET_NA]
-    assert not sourcing, f"dark cells sourced current (px, step, nA): {sourcing[:10]}"
+    steps, _ = run_sweep(tester, flatsat)
+    ohms = PVD_SERIES_OHMS
+    off = [(px, step, set_mv, i) for px, step, set_mv, i in steps
+           if px in PVD_PIXELS and abs(i + set_mv * 1e6 / ohms) > CELL_TOLERANCE * set_mv * 1e6 / ohms + CELL_OFFSET_NA]
+    assert not off, f"dark cells off -V/R (px, step, mV, nA): {off[:10]}"

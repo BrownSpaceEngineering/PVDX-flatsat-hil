@@ -9,10 +9,11 @@ Every command is one line; every reply is one JSON object with "ok". The command
     out fullscale <volts>              output voltage at 100% (the tester measures or assumes it)
     pixel get                          [isc_ua, voc_mv] for each of the 16 emulated perovskite pixels
     pixel set <0-15|all> <isc_ua> <voc_mv>
+    pixel eval <0-15> <follow_mv>      the model's current (nA) for that pixel alone at that follower voltage
     pmb get                            MCP23017 / INA226 emulator state, PVD_CRNT voltage
     pmb log <from>                     CURRENT register reads the flatsat made: [selected mask, follower mV, nA]
     stxg2 get                          S-band emulator state and SPI statistics
-    fault <device> <mode>              stxg2 none|nack|bad_id|hold_bus, ina226 none|nack|no_cvrf|bad_id,
+    fault <device> <mode>              stxg2 none|nack|bad_id|hold_bus|mode_nack, ina226 none|nack|no_cvrf|bad_id,
                                        mcp23017 none|nack|stuck, pmb_bus none|hold_bus
     reset                              emulators to power-on, faults cleared, outputs 0 V, pixels dark
     watch start|stop|get               record the flatsat's digital outputs: edges stream on RTT channel 2 (lib/logic.py)
@@ -126,6 +127,10 @@ class Tester:
         """Sends one command and returns its reply; raises TesterError if the reply has ok = false."""
         with self.lock:
             self.last_command = time.monotonic()
+            # A reply that arrives after its command timed out would otherwise be taken as this command's reply
+            self.pending = b""
+            while self.transport.read():
+                pass
             self.transport.write((text + "\n").encode())
             line = self._readline(timeout)
         if line is None:
@@ -189,6 +194,10 @@ class Tester:
     def set_pixel(self, pixel, isc_ua, voc_mv):
         """An emulated perovskite board pixel's IV curve."""
         self.command(f"pixel set {pixel} {isc_ua:.3f} {voc_mv:.3f}")
+
+    def pixel_current_na(self, pixel, follow_mv):
+        """What the tester's pixel model serves for one pixel routed alone with the follower at follow_mv."""
+        return self.command(f"pixel eval {pixel} {follow_mv:.3f}")["current_na"]
 
     def pmb(self):
         return self.command("pmb get")

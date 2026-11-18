@@ -163,13 +163,15 @@ int analog_out_find(const char *name) {
     return -1;
 }
 
-void analog_out_set_full_scale(float v) {
-    if (v > 2.5f && v < 3.6f) {
-        full_scale_v = v;
-        for (analog_out_t out = 0; out < ANALOG_OUT_COUNT; out++) {
-            apply(out);
-        }
+bool analog_out_set_full_scale(float v) {
+    if (!(v > 2.5f && v < 3.6f)) {
+        return false;
     }
+    full_scale_v = v;
+    for (analog_out_t out = 0; out < ANALOG_OUT_COUNT; out++) {
+        apply(out);
+    }
+    return true;
 }
 
 float analog_out_full_scale(void) {

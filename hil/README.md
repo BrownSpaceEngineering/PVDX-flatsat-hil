@@ -55,7 +55,9 @@ generated into `tester/ASF/`), `tester/src/board.h` and `tester/src/analog_out.c
 output stays high impedance until the suite arms it, and disconnects when the suite stops talking to the tester.
 
 Every PWM line into a flatsat ADC needs an RC filter (10 kΩ in series, then 1 µF to ground on the flatsat side): the
-flatsat averages only 4 instantaneous samples, so raw PWM reads as 0, 1023, 2047, 3071 or 4095. The cells need only the
+flatsat averages only 4 instantaneous samples, so raw PWM reads as 0, 1023, 2047, 3071 or 4095. Nothing else may load
+those pins: take the flatsat's own thermistors and their divider resistors, and anything else on PHD_x, off the pins the
+tester drives (the expected voltages are the divider node's, `models.thermistor_volts`). The cells need only the
 series resistor, because the perovskite board's INA226 integrates over each conversion.
 
 | From | To | Through | Signal |
@@ -78,20 +80,25 @@ series resistor, because the perovskite board's INA226 integrates over each conv
 | Tester D52 (PD09) | Flatsat SBAND_SCK (PB17) | | |
 | Tester D53 (PD10) | Flatsat SBAND_CS (PB19) | | |
 | Tester GND | Flatsat GND, PMB J5-9 | | |
-| Flatsat PVD DAC (PA02) | PMB J6-1, VDAC | | Pixel voltage (21k/12k divider and follower on the PMB) |
+| Flatsat PVD DAC (PA02) | PMB J6-1, VDAC | | Pixel voltage: VDAC x 12/33 (R1 21k, R2 12k to ground), 0-1.2 V, through a follower |
 | Flatsat I2C_SENSORS SDA (PD09) | PMB J6-2, SDA | | MCP23017 0x20, INA226 0x40 |
 | Flatsat I2C_SENSORS SCL (PD08) | PMB J6-3, SCK | | |
 | Flatsat 3V3, GND | PMB J4-2, J4-1 | | PMB power |
 
 **Emulated perovskite board**, instead of the real one (disconnect the real board's J6: both answer at 0x20 and 0x40).
 The pvd outputs then do nothing. The tests that need it are `test_perovskite_emulated.py` and the perovskite faults in
-`test_boot.py`; `test_perovskite.py` needs the real board.
+`test_boot.py`; `test_perovskite.py` needs the real board. Each of them checks after boot which board answered, and
+skips if it's the other one.
+
+The tester measures PVD_CRNT against its own supply scaled to the flatsat's (see the full scale below), so the
+follower voltage it serves is right relative to what the flatsat commanded, not in absolute volts (about 1% off when
+the flatsat's 3V3 is).
 
 | From | To | Signal |
 |---|---|---|
 | Flatsat I2C_SENSORS SDA (PD09) | Tester D20/SDA (PB20) | MCP23017 0x20, INA226 0x40 (the flatsat's pull-ups) |
 | Flatsat I2C_SENSORS SCL (PD08) | Tester D21/SCL (PB21) | |
-| Flatsat PVD DAC (PA02) | Tester A7 (PB04) | Pixel voltage: the tester applies the PMB's 21k/12k divider |
+| Flatsat PVD DAC (PA02) | Tester A7 (PB04) | Pixel voltage: the tester applies the PMB's divider, x 12/33 |
 
 ## Wiring: flatsat outputs to tester
 
@@ -127,14 +134,17 @@ can use a J-Link at a time, so stop any GDB server or RTT viewer on either probe
 | `test_boot.py` | The S-band, perovskite, photodiode and thermistor startup checks pass. Each emulated S-band and perovskite-board fault (NACK, bad ID, held bus) fails its check without stopping the boot. A dark, cold start boots. |
 | `test_photodiodes.py` | PHD_0, 5, 10 and 15 each read their own voltage (catches swapped wires and `PHD_CFG` mistakes). |
 | `test_thermal.py` | The thermistor check reads the simulated temperatures. An open thermistor fails it. Heater hysteresis and partner fallback are tested on the heater lines. |
-| `test_magnetorquers.py` | No shoot-through. 1 kHz PWM. Each burst's duty matches the duty ADCS logged. nSLEEP high while driving. Manual: B-dot reverses with rotation. |
-| `test_perovskite_emulated.py` | A full sweep on the emulated perovskite board: each logged step matches the pixel the tester had routed and the current it served, one pixel at a time, every pixel visited. A never-ready INA226 and a stuck MCP23017 latch are handled. |
-| `test_perovskite.py` | A full sweep on the real perovskite board: each cell pixel follows its IV line (Voc, Isc, and the slope, which checks the pixel voltage the flatsat logs), the other pixels read open, and dark cells only sink current. |
-| `test_sband.py` | ID and scratchpad. EN/RST power sequencing. No stray registers. |
+| `test_magnetorquers.py` | IN1 and IN2 never both high (brake). 1 kHz PWM within each burst. Each burst's duty matches the duty ADCS logged for it, in order. nSLEEP rises at least t_wake before each burst and drops between bursts. Manual: B-dot reverses with rotation. |
+| `test_perovskite_emulated.py` | A full sweep on the emulated perovskite board: each logged step matches the pixel the tester had routed, the current it served and the follower voltage it measured, one pixel at a time, every pixel visited, up to 1.2 V. A never-ready INA226 fails each pixel after a few steps, and a stuck MCP23017 latch is caught. The host's pixel model matches the tester's. |
+| `test_perovskite.py` | A full sweep on the real perovskite board: each cell pixel follows its IV line (Voc, Isc, and the slope, which checks the pixel voltage the flatsat logs), the other pixels read open, and dark cells follow -V/R. |
+| `test_sband.py` | ID and scratchpad. EN/RST power sequencing. The driver only talks to the radio while it's powered and out of reset, and only touches registers the radio has, in modes that accept them. |
 | `test_state_machine.py` | IDLE, FAKE_HEARTBEAT, IDLE, PEROVSKITE_CAPTURE timing. |
 | `test_real_devices.py` | Real devices pass their checks. The magnetometer reads the Earth's field and the gyro reads still. The fuel gauges report a battery level. |
-| `test_burn.py` | The burn pin stays low once burned. A short-wait build fires once and resumes its wait after a reset. |
+| `test_burn.py` | The burn pin stays low once burned. A short-wait build fires exactly one pulse of the logged length, and resumes its wait after a reset. |
 | `test_uhf.py` | With a HackRF: UHF beacons are on the air. |
+
+A test during which the flatsat reports dropped log lines (`[!] N log lines dropped`, its RTT buffer was full) fails:
+its log checks can't be trusted.
 
 Tests for behaviour the firmware doesn't have yet are marked `xfail` with the TODO they wait on, so they start passing
 when it lands:

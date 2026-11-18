@@ -3,8 +3,8 @@
  *
  * The perovskite measurement board as one I2C target answering two addresses, the MCP23017 (0x20) and the INA226
  * (0x40), and its follower voltage. The board measures PVD_CRNT (the flatsat's DAC output) and passes it in;
- * on the real board it goes through a 12k/21k divider to an op-amp follower (src/drivers/pmb/pvd_dac.h), so the
- * follower sits at 21/33 of it.
+ * on the real board it goes through R1 (21k) to the divider node and R2 (12k) to ground, and an op-amp follows the
+ * node (PVDXdevref boards/adcs-pmb/schematics/perovskites.kicad_sch), so the follower sits at 12/33 of it: 0-1.2 V.
  */
 
 #include "pmb_model.h"
@@ -13,7 +13,7 @@
 #include "mcp23017_model.h"
 #include "tester_platform.h"
 
-#define DIVIDER_RATIO (21.0f / 33.0f)
+#define DIVIDER_RATIO (12.0f / 33.0f)
 
 static volatile float pvd_crnt_v = 0.0f;
 static volatile uint32_t transactions = 0;

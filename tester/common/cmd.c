@@ -1,12 +1,13 @@
 /**
  * cmd.c
  *
- * Host commands over USB serial: one command per line, one JSON object per reply line, always with "ok". The host
- * side is hil/lib/tester.py, which documents each command. Shared by both tester firmwares (see tester_platform.h).
+ * Host commands over RTT (tester_platform.h's link): one command per line, one JSON object per reply line, always with
+ * "ok". The host side is hil/lib/tester.py, which documents each command. Shared by both tester firmwares (see tester_platform.h).
  */
 
 #include "cmd.h"
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -27,6 +28,21 @@ static char line[LINE_MAX];
 static size_t line_len = 0;
 static uint32_t last_command_ms = 0;
 static char reply[REPLY_MAX];
+
+int cmd_append(char *buf, size_t len, int n, const char *format, ...) {
+    if (n < 0) {
+        return n;
+    }
+    va_list args;
+    va_start(args, format);
+    const int added = vsnprintf(buf + ((size_t)n < len ? (size_t)n : len), cmd_room(len, n), format, args);
+    va_end(args);
+    return added < 0 ? added : n + added;
+}
+
+size_t cmd_room(size_t len, int n) {
+    return n >= 0 && (size_t)n < len ? len - (size_t)n : 0;
+}
 
 static void send(int len) {
     if (len < 0) {
@@ -55,9 +71,7 @@ static void ok_with(int (*members)(char *, size_t)) {
         error("not available on this tester");
         return;
     }
-    n += added;
-    n += snprintf(reply + n, REPLY_MAX - (size_t)n, "}");
-    send(n);
+    send(cmd_append(reply, REPLY_MAX, n + added, "}")); // send() replaces a reply that didn't fit
 }
 
 static bool parse_float(const char *s, float *value) {
@@ -78,9 +92,9 @@ static int out_members(char *buf, size_t len) {
     int n = snprintf(buf, len, "\"armed\":%s,\"full_scale_mv\":%d,\"volts\":{", analog_out_armed() ? "true" : "false",
                      (int)(analog_out_full_scale() * 1000.0f));
     for (uint8_t out = 0; out < analog_out_count(); out++) {
-        n += snprintf(buf + n, len - (size_t)n, "%s\"%s\":%d", out ? "," : "", analog_out_name(out), (int)(analog_out_get(out) * 1000.0f));
+        n = cmd_append(buf, len, n, "%s\"%s\":%d", out ? "," : "", analog_out_name(out), (int)(analog_out_get(out) * 1000.0f));
     }
-    return n + snprintf(buf + n, len - (size_t)n, "}");
+    return cmd_append(buf, len, n, "}");
 }
 
 static void cmd_out(char **tok, size_t count) {
@@ -90,7 +104,10 @@ static void cmd_out(char **tok, size_t count) {
     }
     float volts;
     if (count == 3 && strcmp(tok[1], "fullscale") == 0 && parse_float(tok[2], &volts)) {
-        analog_out_set_full_scale(volts);
+        if (!analog_out_set_full_scale(volts)) {
+            error("full scale must be 2.5-3.6 V");
+            return;
+        }
         ok_with(out_members);
         return;
     }
@@ -120,16 +137,23 @@ static void cmd_pixel(char **tok, size_t count) {
         int n = snprintf(reply, REPLY_MAX, "{\"ok\":true,\"pixels\":[");
         for (uint8_t p = 0; p < PIXEL_COUNT; p++) {
             pixel_get(p, &isc, &voc);
-            n += snprintf(reply + n, REPLY_MAX - (size_t)n, "%s[%d,%d]", p ? "," : "", (int)isc, (int)voc);
+            n = cmd_append(reply, REPLY_MAX, n, "%s[%d,%d]", p ? "," : "", (int)isc, (int)voc);
         }
-        n += snprintf(reply + n, REPLY_MAX - (size_t)n, "]}");
+        n = cmd_append(reply, REPLY_MAX, n, "]}");
         send(n);
+        return;
+    }
+    float follow_mv;
+    if (count == 4 && strcmp(tok[1], "eval") == 0 && parse_uint(tok[2], &pixel) && pixel < PIXEL_COUNT && parse_float(tok[3], &follow_mv)) {
+        // The model's current for one pixel routed alone, so the host can check hil/lib/models.py against it
+        const float current_na = pixel_current_a((uint8_t)pixel, follow_mv * 1e-3f) * 1e9f;
+        send(snprintf(reply, REPLY_MAX, "{\"ok\":true,\"current_na\":%ld}", (long)(current_na < 0.0f ? current_na - 0.5f : current_na + 0.5f)));
         return;
     }
     const bool all = count == 5 && strcmp(tok[2], "all") == 0;
     if (count != 5 || strcmp(tok[1], "set") != 0 || (!all && (!parse_uint(tok[2], &pixel) || pixel >= PIXEL_COUNT)) ||
         !parse_float(tok[3], &isc) || !parse_float(tok[4], &voc)) {
-        error("usage: pixel get | pixel set <0-15|all> <isc_ua> <voc_mv>");
+        error("usage: pixel get | pixel set <0-15|all> <isc_ua> <voc_mv> | pixel eval <0-15> <follow_mv>");
         return;
     }
     for (uint8_t p = 0; p < PIXEL_COUNT; p++) {
@@ -143,10 +167,10 @@ static void cmd_pixel(char **tok, size_t count) {
 static int pmb_members(char *buf, size_t len) {
     int n = snprintf(buf, len, "\"pvd_crnt_mv\":%d,\"i2c_transactions\":%lu,\"i2c_nacks\":%lu,\"mcp23017\":{",
                      (int)(pmb_pvd_crnt_v() * 1000.0f), (unsigned long)pmb_transactions(), (unsigned long)pmb_nacks());
-    n += mcp23017_json(buf + n, len - (size_t)n);
-    n += snprintf(buf + n, len - (size_t)n, "},\"ina226\":{");
-    n += ina226_json(buf + n, len - (size_t)n);
-    return n + snprintf(buf + n, len - (size_t)n, "},\"log_count\":%lu", (unsigned long)ina226_log_count());
+    n += mcp23017_json(buf + len - cmd_room(len, n), cmd_room(len, n)); // At buf + n, with no room once full
+    n = cmd_append(buf, len, n, "},\"ina226\":{");
+    n += ina226_json(buf + len - cmd_room(len, n), cmd_room(len, n)); // At buf + n, with no room once full
+    return cmd_append(buf, len, n, "},\"log_count\":%lu", (unsigned long)ina226_log_count());
 }
 
 static void cmd_pmb(char **tok, size_t count) {
@@ -167,11 +191,11 @@ static void cmd_pmb(char **tok, size_t count) {
     for (; index < total && sent < LOG_ENTRIES_PER_REPLY; index++) {
         ina226_sample_t s;
         if (ina226_log_entry(index, &s)) {
-            n += snprintf(reply + n, REPLY_MAX - (size_t)n, "%s[%u,%d,%ld]", sent ? "," : "", s.selected, s.follow_mv, (long)s.current_na);
+            n = cmd_append(reply, REPLY_MAX, n, "%s[%u,%d,%ld]", sent ? "," : "", s.selected, s.follow_mv, (long)s.current_na);
             sent++;
         }
     }
-    n += snprintf(reply + n, REPLY_MAX - (size_t)n, "],\"next\":%lu,\"total\":%lu}", (unsigned long)index, (unsigned long)total);
+    n = cmd_append(reply, REPLY_MAX, n, "],\"next\":%lu,\"total\":%lu}", (unsigned long)index, (unsigned long)total);
     send(n);
 }
 
@@ -183,7 +207,7 @@ static void cmd_fault(char **tok, size_t count) {
     const char *const device = tok[1];
     const char *const mode = tok[2];
     if (strcmp(device, "stxg2") == 0) {
-        static const char *const MODES[] = {"none", "nack", "bad_id", "hold_bus"};
+        static const char *const MODES[] = {"none", "nack", "bad_id", "hold_bus", "mode_nack"};
         for (int i = 0; i < 4; i++) {
             if (strcmp(mode, MODES[i]) == 0) {
                 stxg2_set_fault((stxg2_fault_t)i);

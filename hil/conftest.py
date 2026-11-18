@@ -57,7 +57,10 @@ def tester(tester_session, request):
     # flatsat in the test, the tester's voltages are scaled so that each is that fraction of the flatsat's real supply
     full_scale = tester_session.vdd()
     if "flatsat" in request.fixturenames:
-        full_scale *= models.VDD / request.getfixturevalue("flatsat").vdd()
+        flatsat_vdd = request.getfixturevalue("flatsat").vdd()
+        if flatsat_vdd < 1.0:
+            pytest.fail(f"the flatsat's J-Link reads {flatsat_vdd:.2f} V on VTref: is the flatsat powered?")
+        full_scale *= models.VDD / flatsat_vdd
     tester_session.set_full_scale(full_scale)
     tester_session.reset()
     yield tester_session
@@ -79,6 +82,19 @@ def flatsat():
     f.close()
 
 
+@pytest.fixture(autouse=True)
+def complete_flatsat_log(request):
+    """Fails a test during which the flatsat dropped log lines: its checks may have missed them."""
+    if "flatsat" not in request.fixturenames:
+        yield
+        return
+    flatsat = request.getfixturevalue("flatsat")
+    mark = flatsat.mark()
+    yield
+    dropped = flatsat.dropped_lines(mark)
+    assert not dropped, f"the flatsat dropped {dropped} log lines (RTT buffer full), so this test's log checks are unreliable"
+
+
 @pytest.fixture(scope="session")
 def logic(tester_session):
     return logic_lib.LogicRecorder(tester_session)
@@ -94,6 +110,17 @@ def set_environment(tester, photodiodes=NOMINAL_PHOTODIODE_VOLTS, temps_c=(NOMIN
         isc, voc = nominal_pixel(p) if pixels else (0.0, 0.0)
         tester.set_pixel(p, isc, voc)
     tester.arm()
+
+
+def skip_unless_perovskite_board(tester, emulated):
+    """Call after a boot (whose device checks address the perovskite board). Skips the test if the other perovskite
+    board is the one wired to the flatsat: the emulated one sees I2C traffic (ACKed or, under a fault, NACKed), the
+    real one leaves the emulator's counters at 0."""
+    pmb = tester.pmb()
+    wired = pmb["i2c_transactions"] + pmb["i2c_nacks"] > 0
+    if wired != emulated:
+        pytest.skip("the tester's emulated perovskite board is wired, not the real one" if wired
+                    else "the real perovskite board is wired, not the tester's emulated one")
 
 
 @pytest.fixture
@@ -120,4 +147,4 @@ def pytest_collection_modifyitems(config, items):
                 item.add_marker(skip_hackrf)
 
 
-__all__ = ["TesterError", "set_environment", "nominal_pixel", "DARK"]
+__all__ = ["TesterError", "set_environment", "nominal_pixel", "skip_unless_perovskite_board", "DARK"]

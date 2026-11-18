@@ -2,8 +2,9 @@
  * pixel_model.c
  *
  * Perovskite pixels as ideal single-diode cells: I(V) = Isc - I0 (exp(V / (n Vt)) - 1), with I0 chosen so that I(Voc) = 0.
- * Positive current is the pixel sourcing current, as src/drivers/pmb/ina226.h counts it. On the board the pixel sits at
- * the follower voltage plus the 10 ohm shunt drop, V = V_follow + I * 10 ohm, which a few fixed-point steps solve.
+ * Positive current is the pixel sourcing current, as src/drivers/pmb/ina226.h counts it. On the board every routed pixel
+ * is on PIXEL+, which sits at the follower voltage plus the 10 ohm shunt drop of their summed current,
+ * V = V_follow + I * 10 ohm. The sum falls as I rises, so bisection on I always finds the one solution.
  */
 
 #include "pixel_model.h"
@@ -14,6 +15,7 @@
 #define THERMAL_VOLTAGE_V 0.025852f
 #define SHUNT_OHMS 10.0f
 #define CURRENT_LIMIT_A 0.008f // The INA226 shunt register's range at 10 ohm (+-81.9 mV)
+#define BISECTION_STEPS 32     // 16 mA / 2^32: far below the 250 nA the flatsat resolves
 
 static float isc_a[PIXEL_COUNT];
 static float voc_v[PIXEL_COUNT];
@@ -45,13 +47,37 @@ static float current_at(uint8_t pixel, float v) {
     return i;
 }
 
+// Summed current of the pixels in mask with PIXEL+ at v
+static float total_at(uint16_t mask, float v) {
+    float total = 0.0f;
+    for (uint8_t pixel = 0; pixel < PIXEL_COUNT; pixel++) {
+        if (mask & (1u << pixel)) {
+            total += current_at(pixel, v);
+        }
+    }
+    return total;
+}
+
+float pixels_current_a(uint16_t mask, float follow_v) {
+    // Solves I = total_at(V_follow + I * R). I - total_at(...) rises with I; outside the range the current is clamped
+    float lo = -CURRENT_LIMIT_A, hi = CURRENT_LIMIT_A;
+    if (lo - total_at(mask, follow_v + lo * SHUNT_OHMS) >= 0.0f) {
+        return lo;
+    }
+    if (hi - total_at(mask, follow_v + hi * SHUNT_OHMS) <= 0.0f) {
+        return hi;
+    }
+    for (int step = 0; step < BISECTION_STEPS; step++) {
+        const float mid = 0.5f * (lo + hi);
+        if (mid - total_at(mask, follow_v + mid * SHUNT_OHMS) < 0.0f) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return 0.5f * (lo + hi);
+}
+
 float pixel_current_a(uint8_t pixel, float follow_v) {
-    if (pixel >= PIXEL_COUNT) {
-        return 0.0f;
-    }
-    float i = current_at(pixel, follow_v);
-    for (int step = 0; step < 4; step++) {
-        i = current_at(pixel, follow_v + i * SHUNT_OHMS);
-    }
-    return i;
+    return pixel < PIXEL_COUNT ? pixels_current_a((uint16_t)(1u << pixel), follow_v) : 0.0f;
 }

@@ -46,19 +46,27 @@ OPEN_VOLTS = VDD  # Railed divider: above THERM_K_OPEN of full scale
 IDEALITY = 1.5
 THERMAL_VOLTAGE = 0.025852
 SHUNT_OHMS = 10.0
+CURRENT_LIMIT_A = 0.008  # The INA226 shunt register's range at 10 ohm
 
 
 def pixel_current_na(isc_ua, voc_mv, follow_mv):
-    """Pixel current at a follower voltage, as tester/common/pixel_model.c computes it."""
+    """Pixel current at a follower voltage, as tester/common/pixel_model.c computes it: the I that solves
+    I = I(V_follow + I * R) by bisection, clamped to +-8 mA."""
     if isc_ua <= 0 or voc_mv <= 0:
         return 0.0
     isc, voc, nvt = isc_ua * 1e-6, voc_mv * 1e-3, IDEALITY * THERMAL_VOLTAGE
     i0 = isc / (math.exp(voc / nvt) - 1.0)
+    follow = follow_mv * 1e-3
 
-    def at(v):
-        return max(-0.008, min(0.008, isc - i0 * (math.exp(v / nvt) - 1.0)))
+    def excess(i):  # Rises with i; zero at the solution
+        return i - max(-CURRENT_LIMIT_A, min(CURRENT_LIMIT_A, isc - i0 * (math.exp((follow + i * SHUNT_OHMS) / nvt) - 1.0)))
 
-    i = at(follow_mv * 1e-3)
-    for _ in range(4):
-        i = at(follow_mv * 1e-3 + i * SHUNT_OHMS)
-    return i * 1e9
+    lo, hi = -CURRENT_LIMIT_A, CURRENT_LIMIT_A
+    if excess(lo) >= 0:
+        return lo * 1e9
+    if excess(hi) <= 0:
+        return hi * 1e9
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        lo, hi = (mid, hi) if excess(mid) < 0 else (lo, mid)
+    return (lo + hi) / 2 * 1e9

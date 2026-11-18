@@ -5,6 +5,7 @@ Signal names: mtq_{x,y,z}_in{1,2}, mtq_{x,y,z}_slp, heater1, heater2, burn, sban
 level of every input and which inputs had an edge. A capture turns them into each signal's transitions.
 """
 
+import statistics
 import struct
 import threading
 import time
@@ -61,10 +62,34 @@ class Signal:
         end = self.duration if end is None else end
         return self.high_time(start, end) / (end - start) if end > start else 0.0
 
-    def period(self):
-        """Mean time between rising edges, or None with fewer than two."""
+    def period(self, max_interval=None):
+        """Median time between consecutive rising edges, leaving out intervals of max_interval or more (the gaps
+        between bursts of PWM), or None without two such edges."""
         rises = self.edges(True)
-        return (rises[-1] - rises[0]) / (len(rises) - 1) if len(rises) >= 2 else None
+        intervals = [b - a for a, b in zip(rises, rises[1:]) if max_interval is None or b - a < max_interval]
+        return statistics.median(intervals) if intervals else None
+
+    def segments(self):
+        """(start, end, level) spans covering the whole capture, the starting level included."""
+        ends = self.times[1:] + [self.duration]
+        return [(t, end, level) for t, end, level in zip(self.times, ends, self.levels) if end > t]
+
+
+def both_high_time(a, b):
+    """Total time two signals of one capture are high together, from their levels over the whole capture (so a state
+    already present at the start, or lasting past the end, counts too)."""
+    total = 0.0
+    sb = b.segments()
+    j = 0
+    for start, end, level in a.segments():
+        while j < len(sb) and sb[j][1] <= start:
+            j += 1
+        k = j
+        while k < len(sb) and sb[k][0] < end:
+            if level and sb[k][2]:
+                total += min(end, sb[k][1]) - max(start, sb[k][0])
+            k += 1
+    return total
 
 
 class Capture:
@@ -82,21 +107,27 @@ class CaptureError(RuntimeError):
 
 def build_signals(records, lines, names, t0_us, duration):
     """Each named signal's transitions from the records, in seconds from t0_us. An edge flag with no change of level
-    was a pulse shorter than the tester's interrupt latency: it becomes a zero-width pulse."""
+    was a pulse shorter than the tester's interrupt latency, which becomes a zero-width pulse, unless the previous
+    record already showed that line's change without its flag: the edge came while the tester was reading the levels
+    for another line's edge, and its own record follows (tester/src/watch.c on_edge())."""
     signals = {}
     for name in names:
         bit = 1 << lines[name]
         initial = 1 if records[0][1] & bit else 0
         level, times, levels = initial, [], []
+        unflagged_change = False  # The last record changed this line's level without its edge flag
         for t_us, record_levels, edges in records[1:]:
             t = ((t_us - t0_us) & 0xFFFFFFFF) / 1e6
             now = 1 if record_levels & bit else 0
             if now != level:
                 times.append(t)
                 levels.append(now)
+                unflagged_change = not edges & bit
             elif edges & bit:
-                times += [t, t]
-                levels += [1 - now, now]
+                if not unflagged_change:
+                    times += [t, t]
+                    levels += [1 - now, now]
+                unflagged_change = False
             level = now
         signals[name] = Signal(name, initial, times, levels, duration)
     return signals
@@ -113,6 +144,7 @@ class PendingCapture:
         self.data = bytearray()
         self.error = None
         self.result = None
+        self.stop_early = threading.Event()
         self.t0_us = tester.command("watch start")["t_us"]
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
@@ -120,7 +152,7 @@ class PendingCapture:
     def _run(self):
         try:
             end = time.monotonic() + self.seconds
-            while time.monotonic() < end:
+            while time.monotonic() < end and not self.stop_early.is_set():
                 self._read()
             stop = self.tester.command("watch stop")
             deadline = time.monotonic() + STOP_TIMEOUT_S
@@ -142,6 +174,11 @@ class PendingCapture:
             self.data += data
         else:
             time.sleep(0.005)
+
+    def finish(self):
+        """Stops the recording now, rather than after its `seconds`, and returns the Capture."""
+        self.stop_early.set()
+        return self.wait()
 
     def wait(self):
         self.thread.join(self.seconds + STOP_TIMEOUT_S + 30)

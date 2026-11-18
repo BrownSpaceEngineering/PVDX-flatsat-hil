@@ -1,7 +1,7 @@
 """Magnetorquer H-bridge drive (src/drivers/magnetorquer/magnetorquer_driver.c), recorded by the tester.
 
-Each axis has a DRV8837: IN1 carries the PWM for positive duty, IN2 for negative, both low to coast, and nSLEEP high
-only while driving. ADCS drives the coils for ADCS_LOOP_PERIOD_MS (100 ms), then stops them while the magnetometer
+Each axis has a DRV8837C: IN1 carries the PWM for positive duty, IN2 for negative, both low to coast (both high would
+brake), and nSLEEP high only while driving. ADCS drives the coils for ADCS_LOOP_PERIOD_MS (100 ms), then stops them while the magnetometer
 measures, so a capture shows bursts of 1 kHz PWM separated by gaps of at least 10 ms. The real magnetometer and gyro
 are the inputs, so the duty is whatever B-dot asks for; each burst's duty is compared with the duty ADCS logged.
 """
@@ -11,28 +11,15 @@ import re
 import pytest
 
 from conftest import set_environment
+from logic import both_high_time
 
 AXES = ["x", "y", "z"]
 PWM_PERIOD_S = 1e-3  # CONF_TCC0_WAVE_PER_VAL / CONF_TCC1_WAVE_PER_VAL, 1000 us
 GAP_S = 5e-3  # Longer than any PWM low time: separates one ADCS step's burst from the next
 CAPTURE_S = 4.0
 DUTY_TOLERANCE = 0.02
+T_WAKE_S = 30e-6  # DRV8837C: nSLEEP high this long before IN1/IN2 take effect (datasheet p6)
 DUTY_LOG = r"adcs: magnetorquer duty \[x,y,z\]: \[([-\d.e+]+),([-\d.e+]+),([-\d.e+]+)\]"
-
-
-def overlap(a, b):
-    """Total time both signals are high (both pulse lists are in time order)."""
-    pa, pb = a.pulses(), b.pulses()
-    total, i, j = 0.0, 0, 0
-    while i < len(pa) and j < len(pb):
-        a_start, a_end = pa[i][0], pa[i][0] + pa[i][1]
-        b_start, b_end = pb[j][0], pb[j][0] + pb[j][1]
-        total += max(0.0, min(a_end, b_end) - max(a_start, b_start))
-        if a_end < b_end:
-            i += 1
-        else:
-            j += 1
-    return total
 
 
 def bursts(in1, in2):
@@ -49,8 +36,20 @@ def bursts(in1, in2):
         sign = group[0][2]
         widths = [w for _, w, _ in group]
         duty = min(1.0, sum(widths) / len(widths) / PWM_PERIOD_S)
-        out.append((group[0][0], sign * duty))
+        end = group[-1][0] + group[-1][1]
+        out.append((group[0][0], end, sign * duty))
     return out
+
+
+def pair_by_order(measured, logged):
+    """Pairs the k-th burst with the k-th logged duty, at the offset into the log that matches best: the log also
+    covers the bursts the capture cut off at either end. Returns [(burst duty, logged duty)]."""
+    best = []
+    for offset in range(len(logged) - len(measured) + 1):
+        pairs = list(zip(measured, logged[offset:]))
+        if not best or sum(abs(m - lg) > DUTY_TOLERANCE for m, lg in pairs) < sum(abs(m - lg) > DUTY_TOLERANCE for m, lg in best):
+            best = pairs
+    return best
 
 
 @pytest.fixture(scope="module")
@@ -68,16 +67,20 @@ def drive_capture(tester_session, flatsat, logic):
 
 
 @pytest.mark.parametrize("axis", AXES)
-def test_no_shoot_through(drive_capture, axis):
+def test_never_brakes(drive_capture, axis):
+    """IN1 and IN2 both high is the DRV8837C's brake, not shoot-through (it protects itself), but the driver means to
+    coast: one input at a time. Checked on the levels over the whole capture, so a brake held from before the capture
+    starts, or past its end, counts too."""
     capture, _ = drive_capture
-    both_high = overlap(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])
-    assert both_high == 0.0, f"IN1 and IN2 of {axis} were both high for {both_high * 1e6:.1f} us"
+    both_high = both_high_time(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])
+    assert both_high == 0.0, f"IN1 and IN2 of {axis} were both high (brake) for {both_high * 1e6:.1f} us"
 
 
 @pytest.mark.parametrize("axis", AXES)
 def test_pwm_period(drive_capture, axis):
     capture, _ = drive_capture
-    periods = [p for p in (capture[f"mtq_{axis}_in{n}"].period() for n in (1, 2)) if p]
+    # Rising edges within a burst only: the gaps between bursts aren't PWM periods
+    periods = [p for p in (capture[f"mtq_{axis}_in{n}"].period(max_interval=GAP_S) for n in (1, 2)) if p]
     if not periods:
         pytest.skip(f"no PWM on axis {axis} during the capture (B-dot asked for no drive; try the manual test)")
     for period in periods:
@@ -88,21 +91,36 @@ def test_pwm_period(drive_capture, axis):
 def test_burst_duty_matches_the_logged_duty(drive_capture, axis):
     capture, duties = drive_capture
     index = AXES.index(axis)
-    measured = bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])
+    measured = [d for _, _, d in bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])]
     logged = [d[index] for d in duties if abs(d[index]) > 0.005]
     if not measured:
         pytest.skip(f"no PWM bursts on axis {axis} during the capture")
-    assert logged, "PWM on the coil, but ADCS logged no non-zero duty for it"
-    unmatched = [round(d, 3) for _, d in measured if not any(abs(d - lg) <= DUTY_TOLERANCE for lg in logged)]
-    assert not unmatched, f"burst duties {unmatched} match no logged duty (logged: {[round(x, 3) for x in logged]})"
+    assert len(logged) >= len(measured), f"{len(measured)} bursts of PWM, but ADCS logged {len(logged)} non-zero duties"
+    pairs = pair_by_order(measured, logged)
+    wrong = [(round(m, 3), round(lg, 3)) for m, lg in pairs if abs(m - lg) > DUTY_TOLERANCE]
+    assert not wrong, f"(burst duty, logged duty) pairs that differ: {wrong}"
 
 
 @pytest.mark.parametrize("axis", AXES)
 def test_sleep_line_tracks_the_drive(drive_capture, axis):
+    """nSLEEP rises at least t_wake before each burst's first pulse (or that pulse is lost), stays high through the
+    burst, and drops in the gap before the next one."""
     capture, _ = drive_capture
     sleep_line = capture[f"mtq_{axis}_slp"]
-    for start, duty in bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"]):
-        assert sleep_line.level_at(start + 1e-4) == 1, f"nSLEEP low while driving at {start:.4f} s (duty {duty:.3f})"
+    measured = bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])
+    if not measured:
+        pytest.skip(f"no PWM bursts on axis {axis} during the capture")
+    problems = []
+    for start, end, duty in measured:
+        woke = max((t for t in sleep_line.edges(True) if t <= start), default=None)
+        if woke is None or start - woke < T_WAKE_S:
+            problems.append(f"burst at {start:.4f} s: nSLEEP rose {'never' if woke is None else f'{(start - woke) * 1e6:.0f} us'} before it")
+        elif any(woke < t < end for t in sleep_line.edges(False)):
+            problems.append(f"burst at {start:.4f} s (duty {duty:.3f}): nSLEEP dropped during it")
+    for (_, end, _), (next_start, _, _) in zip(measured, measured[1:]):
+        if not any(end <= t <= next_start for t in sleep_line.edges(False)):
+            problems.append(f"nSLEEP stayed high between the bursts at {end:.4f} s and {next_start:.4f} s")
+    assert not problems, "; ".join(problems[:10])
 
 
 @pytest.mark.manual
@@ -112,7 +130,7 @@ def test_rotating_the_board_reverses_bdot(tester, flatsat, logic):
     flatsat.boot()
     print("\nRotate the flatsat back and forth for the next 20 seconds...")
     capture = logic.capture(signals, 20.0)
-    signs = {axis: {d > 0 for _, d in bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])} for axis in AXES}
+    signs = {axis: {d > 0 for _, _, d in bursts(capture[f"mtq_{axis}_in1"], capture[f"mtq_{axis}_in2"])} for axis in AXES}
     assert any(s == {True, False} for s in signs.values()), f"no axis was driven both ways: {signs}"
 
 

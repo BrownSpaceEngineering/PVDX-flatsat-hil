@@ -19,7 +19,7 @@ typedef enum {
 // One CURRENT register read by the flatsat, with what the model was given at the time
 typedef struct {
     uint16_t selected;  // MCP23017 outputs high (pixel bit mask)
-    int16_t follow_mv;  // Follower voltage, from PVD_CRNT x 21/33
+    int16_t follow_mv;  // Follower voltage of the conversion served (PVD_CRNT x 12/33 at the time)
     int32_t current_na; // The value served, at the flatsat's 250 nA/LSB
 } ina226_sample_t;
 

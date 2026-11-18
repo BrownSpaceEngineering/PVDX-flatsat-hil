@@ -3,7 +3,7 @@ emulated S-band radio or perovskite board misbehaves."""
 
 import pytest
 
-from conftest import DARK, set_environment
+from conftest import DARK, set_environment, skip_unless_perovskite_board
 
 RIG_DEVICES = ["SBAND_ID", "PEROVSKITE_ID", "PHOTODIODE_ID", "THERMISTOR_ID"]  # Emulated, or fed by the tester
 
@@ -23,7 +23,11 @@ def test_rig_devices_pass_their_checks(nominal, flatsat):
 
 @pytest.mark.parametrize(
     "mode, warning",
-    [("nack", r"stxg2: no answer on I2C"), ("bad_id", r"stxg2: bad ID 0xdeadbeef"), ("hold_bus", r"stxg2:")],
+    [
+        ("nack", r"stxg2: no answer on I2C"),
+        ("bad_id", r"stxg2: bad ID 0xdeadbeef"),
+        ("hold_bus", r"stxg2: (no answer on I2C|ID read failed)"),
+    ],
 )
 def test_sband_fault_fails_its_check_and_boot_continues(nominal, flatsat, mode, warning):
     nominal.fault("stxg2", mode)
@@ -46,6 +50,7 @@ def test_perovskite_board_fault_fails_its_check(nominal, flatsat, device, mode, 
     """Needs the emulated perovskite board on I2C_SENSORS (hil/README.md)."""
     nominal.fault(device, mode)
     mark = flatsat.boot()
+    skip_unless_perovskite_board(nominal, emulated=True)
     assert flatsat.device_checks(mark).get("PEROVSKITE_ID") is False
     assert flatsat.find_all(warning, mark)
     assert booted_to_scheduler(flatsat, mark)

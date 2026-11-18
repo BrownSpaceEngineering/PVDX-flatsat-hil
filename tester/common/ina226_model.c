@@ -1,11 +1,12 @@
 /**
  * ina226_model.c
  *
- * INA226 current monitor on the perovskite board (datasheet SBOS547A). Registers are 16-bit, MSB first; a write of
+ * INA226 current monitor on the perovskite board (datasheet SBOS547C). Registers are 16-bit, MSB first; a write of
  * [reg] only sets the pointer. Conversions complete every AVG x (VBUSCT + VSHCT) in the continuous modes (one
  * conversion after a CONFIG write in the triggered modes) and set CVRF, which reading MASK_ENABLE or writing CONFIG
- * clears. Each conversion samples the pixel model: shunt = I x 10 ohm, bus = V(PIXEL+) = follower + shunt, and the
- * CURRENT and POWER registers follow the calibration as the datasheet's equations 3 and 4 do.
+ * clears (except a write that selects power-down). Each conversion samples the pixel model, with every routed pixel
+ * conducting in parallel: shunt = I x 10 ohm, bus = V(PIXEL+) = follower + shunt, and the CURRENT and POWER registers
+ * follow the calibration as the datasheet's equations 3 and 4 do.
  */
 
 #include "ina226_model.h"
@@ -55,6 +56,7 @@ static struct {
     uint8_t read_index;
     bool converting;
     uint32_t next_conversion_us;
+    float conversion_follow_v; // follow_v when the result registers were last converted
     // Inputs, set from the main loop
     float follow_v;
     uint16_t selected;
@@ -95,14 +97,11 @@ static int32_t clamp16(float value) {
 }
 
 static void convert(void) {
-    // Exactly one selected pixel conducts; none (or a shorted multi-selection) gives no current
-    uint8_t pixel = 0xFF;
-    if (ina.selected != 0 && (ina.selected & (ina.selected - 1u)) == 0) {
-        pixel = (uint8_t)__builtin_ctz(ina.selected);
-    }
-    const float current_a = pixel_current_a(pixel, ina.follow_v);
+    // Every routed pixel is on PIXEL+, so a multi-selection reads their summed current
+    const float current_a = pixels_current_a(ina.selected, ina.follow_v);
     const float shunt_v = current_a * SHUNT_OHMS;
     ina.shunt = (int16_t)clamp16(shunt_v / SHUNT_LSB_V);
+    ina.conversion_follow_v = ina.follow_v;
     const float bus_v = ina.follow_v + shunt_v;
     ina.bus = bus_v <= 0.0f ? 0 : (uint16_t)clamp16(bus_v / BUS_LSB_V);
     ina.current = (int16_t)clamp16((float)ina.shunt * (float)ina.calibration / 2048.0f);
@@ -137,7 +136,7 @@ static uint16_t read_register(uint8_t reg) {
             ina.current_reads++;
             ina226_sample_t *const s = &ina.log[ina.log_count % LOG_SIZE];
             s->selected = ina.selected;
-            s->follow_mv = (int16_t)clamp16(ina.follow_v * 1000.0f);
+            s->follow_mv = (int16_t)clamp16(ina.conversion_follow_v * 1000.0f);
             s->current_na = (int32_t)ina.current * 250; // Current_LSB the flatsat calibrates for
             ina.log_count++;
             return (uint16_t)ina.current;
@@ -168,14 +167,16 @@ static void write_register(uint8_t reg, uint16_t value) {
                 return;
             }
             ina.config = (uint16_t)((value & 0x0FFFu) | CONFIG_FIXED);
-            ina.mask_enable &= (uint16_t)~ME_CVRF;
+            if ((value & 0x3u) != 0) { // Modes 0 and 4 (power-down) keep CVRF (INA p11)
+                ina.mask_enable &= (uint16_t)~ME_CVRF;
+            }
             start_conversions();
             break;
         case REG_CALIBRATION:
             ina.calibration = value & 0x7FFFu;
             break;
         case REG_MASK_ENABLE:
-            ina.mask_enable = (uint16_t)((value & 0xFC01u) | (ina.mask_enable & 0x001Eu));
+            ina.mask_enable = (uint16_t)((value & 0xFC03u) | (ina.mask_enable & 0x001Cu)); // Flags 4-2 are read-only
             break;
         case REG_ALERT_LIMIT:
             ina.alert_limit = value;

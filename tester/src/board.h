@@ -30,7 +30,7 @@
 // S-band radio data SPI (flatsat SPI_SBAND) is ASF SBAND_SPI on SERCOM7: SCK PD09 [D52], SS PD10 [D53], data in
 // PD11 [D50] (PAD3). Data out, PD08 [D51], isn't wired.
 
-// The flatsat's digital outputs (magnetorquers, heaters, burn wire, S-band EN/RST) go to the logic analyzer, not here
+// The flatsat's digital outputs (magnetorquers, heaters, burn wire, S-band EN/RST) are recorded by watch.c
 
 /* ---------- CLOCKS (set up by ASF from the Atmel START project; clocks.c has the time base) ---------- */
 

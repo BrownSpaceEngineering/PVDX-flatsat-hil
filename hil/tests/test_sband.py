@@ -13,6 +13,8 @@ def test_device_check_talks_to_the_radio(nominal, flatsat):
     state = nominal.stxg2()
     assert state["scratchpad"] == SCRATCH_PATTERN, "the scratchpad write didn't reach the radio"
     assert state["invalid_addr"] == 0, "the driver touched a register the radio doesn't have"
+    assert state["unpowered_accesses"] == 0, "the driver talked to the radio while it was off or held in reset"
+    assert state["rejected_writes"] == 0, "the driver wrote a register the radio doesn't accept in its current mode"
     assert not flatsat.find_all(r"stxg2: I2C status flags", mark)
 
 

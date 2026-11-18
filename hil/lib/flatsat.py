@@ -19,6 +19,7 @@ from rtt import RttLink, control_block_address, open_jlink
 
 LOG_CHANNEL = 1
 ANSI = re.compile(r"\x1b\[[0-9;]*m")
+DROPPED = r"\[!\] (\d+) log lines dropped"  # src/misc/logging/logging.c, when its RTT buffer was full
 
 
 class LogLine:
@@ -123,22 +124,28 @@ class Flatsat:
         regex = re.compile(pattern)
         return [m for m in (regex.search(line.text) for line in self.log(since)) if m]
 
+    def dropped_lines(self, since=0):
+        """How many log lines the flatsat reported dropping after `since` (its RTT buffer was full, so the log is
+        incomplete and a check for a line's absence means nothing)."""
+        return sum(int(m.group(1)) for m in self.find_all(DROPPED, since))
+
     # ---------- Target control ----------
 
     def reset(self):
         """Resets the board and returns a log mark from just before the new boot."""
-        # Halt, then take in what the old boot logged that hasn't been read yet, so the mark is after all of it
+        # Halt, then take in what the old boot logged that hasn't been read yet, so the mark is after all of it. The
+        # reader stays out until the new boot runs, so none of its text is joined to the old boot's unfinished line
         with self.lock:
             self.jlink.halt()
         with self.read_lock:
             while data := self.rtt.read(LOG_CHANNEL):
                 self._add(ANSI.sub("", data.decode("ascii", "replace")))
+            if self.partial:
+                self._add("\n")  # Ends the old boot's last line, which was cut off
             mark = self.mark()
-        with self.lock:
-            self.jlink.reset(halt=True)
-            self.jlink.restart()
-        with self.new_line:
-            self.partial = ""
+            with self.lock:
+                self.jlink.reset(halt=True)
+                self.jlink.restart()
         return mark
 
     def boot(self, timeout=60.0):

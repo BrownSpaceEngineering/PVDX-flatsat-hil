@@ -10,6 +10,7 @@ then flash it with `make flash_to_mram`. The wait is saved to MRAM every 60 s, s
 """
 
 import re
+import time
 
 import pytest
 
@@ -39,17 +40,23 @@ def test_burn_fires_once(nominal, flatsat, logic):
     burned, _ = burn_settings(flatsat, mark)
     if burned:
         pytest.skip("the burn record says burned (main.c forces it); build as this module's docstring says")
-    wait = flatsat.expect(r"Burn wait: \d+/(\d+) s", timeout=90, since=mark)
-    total_wait_s = int(wait.group(1))
-    on_line = flatsat.expect(r"Burn pin \(PB29\) on for (\d+) s", timeout=total_wait_s + 90, since=mark)
+    wait = flatsat.expect(r"Burn wait: (\d+)/(\d+) s", timeout=90, since=mark)
+    remaining_s = int(wait.group(2)) - int(wait.group(1))
+
+    # Recording from before the burn, so the whole pulse (and any second one) is seen; stopped once the burn is done
+    pending = logic.start(["burn"], seconds=remaining_s + 180)
+    on_line = flatsat.expect(r"Burn pin \(PB29\) on for (\d+) s", timeout=remaining_s + 90, since=mark)
     on_s = int(on_line.group(1))
-    capture = logic.capture(["burn"], seconds=on_s + 5.0)
-    pulses = capture["burn"].pulses()
-    high = capture["burn"].high_time()
     flatsat.expect(r"Burn pin \(PB29\) off; burn recorded in MRAM", timeout=on_s + 10, since=mark)
-    assert high > 0, "the log says the burn pin is on, but it never went high (BURN writes commented out in main.c?)"
-    assert len(pulses) <= 1, f"{len(pulses)} burn pulses"
-    assert high <= on_s + 0.5
+    time.sleep(2.0)  # A second pulse right after the first would show here
+    capture = pending.finish()
+
+    pulses = capture["burn"].pulses()
+    assert capture["burn"].high_time() > 0, \
+        "the log says the burn pin is on, but it never went high (BURN writes commented out in main.c?)"
+    assert len(pulses) == 1, f"{len(pulses)} burn pulses: {[(round(t, 2), round(w, 2)) for t, w in pulses]}"
+    assert abs(pulses[0][1] - on_s) <= 0.5, f"the burn pin was high for {pulses[0][1]:.2f} s, not {on_s} s"
+    assert capture["burn"].levels[-1] == 0, "the burn pin was left high"
 
 
 def test_reset_during_the_wait_resumes_it(nominal, flatsat):

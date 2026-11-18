@@ -8,7 +8,8 @@
  *     uint32_t t_us    micros() when the edge was serviced (about 1 us after it)
  *     uint16_t levels  bit n: the input on EIC line n
  *     uint16_t edges   bit n: line n had an edge since the last record. Set with an unchanged level, it was a pulse
- *                      shorter than the interrupt latency.
+ *                      shorter than the interrupt latency, or an edge already shown in the previous record's levels
+ *                      (see on_edge()); hil/lib/logic.py tells the two apart.
  *
  * While recording, the records go into a RAM ring, and watch_poll() moves them to RTT channel 2, which the host drains
  * (hil/lib/logic.py). The first record of a recording has the starting levels and no edges. A record that doesn't fit
@@ -23,6 +24,7 @@
 #include "SEGGER_RTT.h"
 #include "atmel_start.h"
 #include "board.h"
+#include "cmd.h"
 #include "tester_platform.h"
 #include "watch.h"
 
@@ -59,6 +61,8 @@ static const watch_input_t INPUTS[] = {
     {"sband_en", PINMUX_PA14A_EIC_EXTINT14, 14},  // [D28]
     {"sband_rst", PINMUX_PA15A_EIC_EXTINT15, 15}, // [D23]
 };
+#define SBAND_EN_LINE 14u
+#define SBAND_RST_LINE 15u
 #define INPUT_COUNT (sizeof(INPUTS) / sizeof(INPUTS[0]))
 
 static watch_record_t ring[RING_RECORDS];
@@ -91,7 +95,7 @@ static void push(uint16_t edges) {
         dropped++;
         return;
     }
-    // Levels after the time: an edge between the two still gets a record of its own, since its flag is already clear
+    // Levels after the time: an edge between the two shows in these levels, and its flag makes a record of its own
     watch_record_t *const r = &ring[head % RING_RECORDS];
     r->t_us = micros();
     r->levels = levels();
@@ -102,7 +106,9 @@ static void push(uint16_t edges) {
 
 static void on_edge(void) {
     const uint16_t flags = (uint16_t)(EIC->INTFLAG.reg & line_mask);
-    EIC->INTFLAG.reg = flags; // Before the levels are read, so a later edge interrupts again
+    // Cleared before the levels are read, so no edge is lost: one on another line in between shows in this record's levels
+    // without its flag, and then raises its flag, so the next record has it again with no change of level
+    EIC->INTFLAG.reg = flags;
     if (flags == 0) {
         return; // Already serviced along with another line's edge
     }
@@ -215,11 +221,16 @@ int watch_get(char *buf, size_t len) {
     const uint16_t now = levels();
     int n = snprintf(buf, len, "\"recording\":%s,\"lines\":{", recording ? "true" : "false");
     for (uint8_t i = 0; i < INPUT_COUNT; i++) {
-        n += snprintf(buf + n, len - (size_t)n, "%s\"%s\":%u", i ? "," : "", INPUTS[i].name, INPUTS[i].line);
+        n = cmd_append(buf, len, n, "%s\"%s\":%u", i ? "," : "", INPUTS[i].name, INPUTS[i].line);
     }
-    n += snprintf(buf + n, len - (size_t)n, "},\"levels\":{");
+    n = cmd_append(buf, len, n, "},\"levels\":{");
     for (uint8_t i = 0; i < INPUT_COUNT; i++) {
-        n += snprintf(buf + n, len - (size_t)n, "%s\"%s\":%u", i ? "," : "", INPUTS[i].name, (now >> INPUTS[i].line) & 1u);
+        n = cmd_append(buf, len, n, "%s\"%s\":%u", i ? "," : "", INPUTS[i].name, (now >> INPUTS[i].line) & 1u);
     }
-    return n + snprintf(buf + n, len - (size_t)n, "}");
+    return cmd_append(buf, len, n, "}");
+}
+
+bool platform_stxg2_powered(void) {
+    const uint16_t on = (uint16_t)((1u << SBAND_EN_LINE) | (1u << SBAND_RST_LINE));
+    return (levels() & on) == on;
 }

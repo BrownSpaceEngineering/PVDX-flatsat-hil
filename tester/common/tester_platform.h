@@ -32,6 +32,9 @@ void platform_link_write(const char *buf, size_t len);
 void platform_hold_pmb_bus(bool hold);
 void platform_hold_stxg2_bus(bool hold);
 
+// Whether the flatsat has the S-band radio powered (SBAND_EN high) and out of reset (SBAND_RST high). Interrupt-safe
+bool platform_stxg2_powered(void);
+
 // Reboots into the board's bootloader; returns false if the board has none to enter this way
 bool platform_enter_bootloader(void);
 
@@ -43,7 +46,7 @@ void analog_out_set(uint8_t out, float volts);
 float analog_out_get(uint8_t out);
 void analog_out_arm(bool arm); // Connects, or disconnects (high impedance), every output
 bool analog_out_armed(void);
-void analog_out_set_full_scale(float volts); // Output voltage at 100%, measured by the host
+bool analog_out_set_full_scale(float volts); // Output voltage at 100%, measured by the host; false if implausible
 float analog_out_full_scale(void);
 
 // Digital inputs watching the flatsat's outputs (names mtq_{x,y,z}_in{1,2}, mtq_{x,y,z}_slp, heater1, heater2, burn,
