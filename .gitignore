@@ -4,6 +4,9 @@ tester/tester.elf
 tester/tester.bin
 tester/tester.uf2
 
+# Soak runs (soak/run.py)
+soak/runs/
+
 # Python
 __pycache__/
 .pytest_cache/

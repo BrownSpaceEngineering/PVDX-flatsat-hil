@@ -70,6 +70,14 @@ Builds the tests ask for, through `make dev DEFINES="..."` (src/Makefile):
 - burn sequence: `BURN_SEQUENCE_FIRE_BURN_WIRE BURN_WAIT_MINUTES=2 BURN_ON_FOR_SECONDS=5`
 - UHF beacons: `BURN_SEQUENCE BURN_SEQUENCE_UHF_MODE=BURN_UHF_MODE_BEACON POST_BURN_STEP_MINUTES=1`
 
+## Soak test
+
+`flatsat-hil/soak/run.py` runs for days or weeks against the flashed flatsat without resetting it (it only reads RTT),
+plays a simulated orbit through the tester, and writes `soak/runs/<id>/summary.md`, events, metrics and the full log.
+Starting one holds both J-Links for the whole run, so ask the user first, and don't run the suite, `tools/jlink.sh` or
+`tools/rtt.sh` alongside it. The monitors are tested offline with `pytest soak/tests`, and a recorded log can be
+re-checked with `python soak/run.py --replay <log>`. Details: the "Soak test" section of `flatsat-hil/hil/README.md`.
+
 ## Adding an emulated device
 
 1. Pick free SERCOM pads or pins against the Grand Central pin map, and add them to `tester/src/board.h`.

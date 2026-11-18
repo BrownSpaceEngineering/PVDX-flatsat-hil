@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Runs the flatsat soak unattended, restarting it if it exits (it then resumes soak/runs/current).
+     Edit the paths and serial numbers, copy to ~/Library/LaunchAgents/, then:
+         launchctl load ~/Library/LaunchAgents/com.pvdx.flatsat-soak.plist
+     Stop with launchctl unload (the run stays resumable). -->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.pvdx.flatsat-soak</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/path/to/PVDX/flatsat-hil/soak/start.sh</string>
+    </array>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHON</key>
+        <string>/path/to/venv/bin/python</string>
+        <key>HIL_FLATSAT_JLINK</key>
+        <string>000000000</string>
+        <key>HIL_TESTER_JLINK</key>
+        <string>000000000</string>
+        <key>PATH</key>
+        <string>/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>60</integer>
+    <key>StandardOutPath</key>
+    <string>/path/to/PVDX/flatsat-hil/soak/runs/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/path/to/PVDX/flatsat-hil/soak/runs/launchd.log</string>
+</dict>
+</plist>

@@ -49,6 +49,11 @@ SHUNT_OHMS = 10.0
 CURRENT_LIMIT_A = 0.008  # The INA226 shunt register's range at 10 ohm
 
 
+def nominal_pixel(pixel):
+    """Distinct, plausible IV parameters per emulated pixel, so a mixed-up pixel shows in the currents."""
+    return 40.0 + 8.0 * pixel, 850.0 + 10.0 * pixel  # Isc uA, Voc mV
+
+
 def pixel_current_na(isc_ua, voc_mv, follow_mv):
     """Pixel current at a follower voltage, as tester/common/pixel_model.c computes it: the I that solves
     I = I(V_follow + I * R) by bisection, clamped to +-8 mA."""

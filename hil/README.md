@@ -152,3 +152,51 @@ when it lands:
 - **S-band data path:** nothing calls `stxg2_store()` yet.
 
 **Not covered:** low-battery behaviour. The fuel gauges and batteries are real, so the rig can't set the battery level.
+
+## Soak test (`soak/`)
+
+A run of days to weeks with no resets: the satellite has to keep running on its own. `soak/run.py` plays a simulated
+orbit to the flatsat through the tester (sunlight and eclipse on the photodiodes, perovskite cells and emulated pixels,
+temperatures swinging across the heater thresholds), records everything the flatsat logs, and runs monitors over it.
+It only reads RTT, which doesn't disturb the target, and never resets or halts either board, so every reset it sees is
+one the satellite did.
+
+**Setup.** As for the suite, with the real batteries and charger on the flatsat (charger input from a current-limited,
+fused bench supply; batteries in a LiPo bag). Flash a DEVBUILD with `make flash_to_mram` and wait for "golden copy
+written from flash". Set `HIL_FLATSAT_JLINK` and `HIL_TESTER_JLINK`: identifying the probes connects to each, which
+the runner does only once. The tester must be connected when the runner starts.
+
+**Running.**
+
+    python soak/run.py --hours 24                # foreground; Ctrl-C ends it cleanly
+    soak/start.sh                                # new run, or resume soak/runs/current, under caffeinate
+    python soak/run.py --resume soak/runs/<id>   # carry on after a restart
+    python soak/run.py --replay rtt.log          # monitors over a recorded log, offline
+    pytest soak/tests                            # the monitors against crafted logs, no hardware
+
+For an unattended run, edit `soak/com.pvdx.flatsat-soak.plist` and load it with `launchctl`: it starts `start.sh` at
+login and restarts it if the runner crashes, and the run resumes from its checkpoint. Settings are in
+`soak/config.toml`, copied into the run directory when a run starts (shorten `[orbit] period_s` to cycle faster).
+
+**Monitors** (`soak/monitors.py`). Each writes an event: fail, warn, or info.
+
+| Monitor | Fails when |
+|---|---|
+| liveness | No log line for `max_log_silence_s`. |
+| resets | A boot that wasn't commanded, or the MRAM boot count skipping boots the log didn't show. |
+| log | Any fatal or "log lines dropped"; more than `max_warnings_per_hour` warnings off the allowlist. Each new kind of warning is a warn event. |
+| state_machine | A state held longer than its `max_state_s`. |
+| payload | No perovskite sweep finished in `max_sweep_gap_s`. |
+| power | The logged battery level below `min_battery_level`. |
+| outputs | The hourly edge capture shows a magnetorquer braking (IN1 and IN2 both high) or the burn pin high. |
+
+**Results** in `soak/runs/<id>/` (ignored by git): `summary.md` (status, counters, every fail and warn), `daily/`,
+`events.jsonl`, `metrics.csv` (once a minute), and the full flatsat log as `rtt-YYYYMMDD.log`. A live run exits 0
+when it ends as asked, whatever it found; read `summary.md`.
+
+**Radio (next phase).** Real UHF uplink and downlink need the radio task (the `radio-task` branch, still changing) and
+a ground station: a second AT86RF215 running PVDXos's own radio, USLP and CFDP code, cabled to the flatsat through at
+least 60 dB of attenuation. The runner then adds downlink cadence and frame-count monitors, uplinks commands during
+simulated passes (`[passes]` in the config) and checks each is acknowledged in telemetry and in the log. To follow the
+radio code as it changes, the ground firmware compiles PVDXos's sources and the host reads its constants from PVDXos's
+headers, rather than keeping copies.

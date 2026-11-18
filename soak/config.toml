@@ -1,0 +1,50 @@
+# Soak test settings (soak/run.py). Times in seconds. Copy and edit for a run; pass with --config.
+
+[orbit]
+# A 95-minute low Earth orbit, eclipsed for the last 35%. Shorten period_s to cycle faster on the bench.
+period_s = 5700
+eclipse_fraction = 0.35
+temp_min_c = -10.0
+temp_max_c = 35.0
+
+[passes]
+# Ground passes: the ground station transmits only inside them (phase 2; ignored until the ground station exists).
+interval_s = 21600
+pass_s = 600
+offset_s = 300
+
+[environment]
+update_s = 10                                # How often the tester's inputs follow the orbit
+sunlit_photodiode_volts = [1.2, 0.9, 0.6, 0.3]
+eclipse_photodiode_volts = [0.0, 0.0, 0.0, 0.0]
+pvd_vocs = [0.9, 0.6, 0.3, 0.0]              # Real perovskite board cells (sunlit; 0 in eclipse)
+emulated_pixels = true                       # Light the emulated perovskite board's pixels while sunlit
+
+[capture]
+interval_s = 3600                            # Edge capture of the magnetorquer and burn lines
+seconds = 10
+
+[monitors]
+max_log_silence_s = 60
+reboot_grace_s = 120
+max_warnings_per_hour = 120
+min_battery_level = 0.2
+max_sweep_gap_s = 1200
+default_max_state_s = 600
+# Warnings expected on this bench (regexes). The S-band I2C and THERM inputs depend on the wiring; see hil/README.md.
+warning_allowlist = [
+    "fuel_gauge: no pack read",
+]
+
+[monitors.max_state_s]
+# Longest stay in each state (names from src/states.h); others use default_max_state_s
+STATE_IDLE = 60
+STATE_FAKE_HEARTBEAT = 20
+STATE_PEROVSKITE_CAPTURE = 330
+
+[runner]
+summary_every_s = 300
+metrics_every_s = 60
+checkpoint_every_s = 60
+keep_log_lines = 20000                       # Flatsat log lines kept in memory (all are written to disk)
+reconnect_after_s = 120                      # Silence after which the J-Link sessions are reopened (never a reset)

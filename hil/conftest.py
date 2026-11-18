@@ -22,6 +22,7 @@ import logic as logic_lib  # noqa: E402
 import models  # noqa: E402
 import rtt  # noqa: E402
 from flatsat import ELF, Flatsat  # noqa: E402
+from models import nominal_pixel  # noqa: E402
 from tester import Tester, TesterError  # noqa: E402
 
 NOMINAL_PHOTODIODE_VOLTS = (1.2, 0.9, 0.6, 0.3)  # Sunlit, distinct per channel
@@ -30,11 +31,6 @@ NOMINAL_TEMP_C = 20.0
 # only sinks current) so both current directions are measured
 NOMINAL_PVD_VOCS = (0.9, 0.6, 0.3, 0.0)
 DARK = (0.0,) * 4  # For photodiodes= or pvds=
-
-
-def nominal_pixel(pixel):
-    """Distinct, plausible IV parameters per emulated pixel, so a mixed-up pixel shows in the currents."""
-    return 40.0 + 8.0 * pixel, 850.0 + 10.0 * pixel  # Isc uA, Voc mV
 
 
 @pytest.fixture(scope="session")

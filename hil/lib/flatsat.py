@@ -34,12 +34,16 @@ class LogLine:
 
 
 class Flatsat:
-    def __init__(self, elf=ELF, serial_number=None):
+    def __init__(self, elf=ELF, serial_number=None, max_lines=None):
+        """max_lines: keep only that many of the latest log lines (for runs of days); marks stay valid, but a query
+        that reaches back past the oldest kept line only sees what is kept. None keeps everything."""
         self.jlink = open_jlink(serial_number)
         self.lock = threading.Lock()  # pylink is not thread safe
         self.rtt = RttLink(self.jlink, control_block_address(elf), self.lock)
         self.read_lock = threading.Lock()  # Held from reading log data to adding it to self.lines
         self.lines = []
+        self.base = 0  # Log position of self.lines[0]: lines before it were discarded (max_lines)
+        self.max_lines = max_lines
         self.partial = ""
         self.lines_lock = threading.Lock()
         self.new_line = threading.Condition(self.lines_lock)
@@ -81,6 +85,10 @@ class Flatsat:
             *complete, self.partial = text.split("\n")
             for line in complete:
                 self.lines.append(LogLine(now, line.rstrip("\r")))
+            if self.max_lines is not None and len(self.lines) > self.max_lines:
+                drop = len(self.lines) - self.max_lines
+                del self.lines[:drop]
+                self.base += drop
             if complete:
                 self.new_line.notify_all()
 
@@ -89,11 +97,16 @@ class Flatsat:
     def mark(self):
         """A position in the log; pass it as `since` to only look at what came after."""
         with self.lines_lock:
-            return len(self.lines)
+            return self.base + len(self.lines)
+
+    def read_new(self, since):
+        """(lines after `since`, the mark to pass next time), taken together so no line is missed or repeated."""
+        with self.lines_lock:
+            return list(self.lines[max(0, since - self.base):]), self.base + len(self.lines)
 
     def log(self, since=0):
         with self.lines_lock:
-            return list(self.lines[since:])
+            return list(self.lines[max(0, since - self.base):])
 
     def expect(self, pattern, timeout=30.0, since=0):
         """Waits for a log line matching `pattern` (regex) after `since`; returns its match. Raises TimeoutError."""
@@ -102,14 +115,16 @@ class Flatsat:
         index = since
         with self.new_line:
             while True:
-                while index < len(self.lines):
-                    match = regex.search(self.lines[index].text)
+                index = max(index, self.base)
+                while index < self.base + len(self.lines):
+                    match = regex.search(self.lines[index - self.base].text)
                     if match:
                         return match
                     index += 1
                 remaining = end - time.monotonic()
                 if remaining <= 0:
-                    tail = "\n".join(line.text for line in self.lines[max(since, len(self.lines) - 30):])
+                    first = max(since - self.base, len(self.lines) - 30, 0)  # Already holding lines_lock
+                    tail = "\n".join(line.text for line in self.lines[first:])
                     raise TimeoutError(f"no log line matching {pattern!r} within {timeout} s. Last lines:\n{tail}")
                 self.new_line.wait(remaining)
 
