@@ -11,12 +11,14 @@ suite (hil/README.md). Everything goes into soak/runs/<id>/ (see soak/report.py)
     python soak/run.py --resume runs/<id>    # carry on after the Mac or the runner restarted
     python soak/run.py --replay rtt.log      # run the monitors over a recorded log, offline
 
-Phase 1 has no radio: the ground station and the uplink and downlink monitors come later (hil/README.md, Soak test).
+With [radio] enabled, a HackRF ground station listens for the satellite's beacons and runs a pass (opening the UHF
+link and trading turns) in each pass window (GroundStation below, hil/lib/ground.py).
 """
 
 import argparse
 import json
 import os
+import queue
 import signal
 import sys
 import threading
@@ -39,7 +41,7 @@ class Runner:
     """Feeds log lines and ticks to the monitors and writes the run directory. Knows nothing about hardware, so the
     live loop and --replay share it."""
 
-    def __init__(self, config, run_dir, info, stop_on_failure=False, echo=True):
+    def __init__(self, config, run_dir, info, stop_on_failure=False, echo=True, radio_constants=None):
         self.config = config
         self.run_dir = run_dir
         self.info = info
@@ -49,7 +51,9 @@ class Runner:
         self.rtt = report.RttLog(run_dir)
         self.events = report.Events(run_dir)
         self.metrics_file = report.Metrics(run_dir)
-        self.monitors = monitors.build(config, self.emit)
+        self.monitors = monitors.build(config, self.emit, radio_constants)
+        self.radio = next((m for m in self.monitors if m.name == "radio"), None)
+        self.posted = queue.Queue()  # Work from other threads (the ground station), run on the main loop's thread
         self.extra_metrics = {}
         r = config["runner"]
         self.last = {"summary": 0.0, "metrics": 0.0, "checkpoint": 0.0}
@@ -78,7 +82,20 @@ class Runner:
         row.update(self.extra_metrics)
         return row
 
+    def post(self, work):
+        """Runs work() on the main loop's thread, which owns the monitors."""
+        self.posted.put(work)
+
+    def drain(self):
+        while True:
+            try:
+                work = self.posted.get_nowait()
+            except queue.Empty:
+                return
+            work()
+
     def tick(self, t):
+        self.drain()
         for m in self.monitors:
             m.on_tick(t)
         day = report.utc(t).strftime("%Y-%m-%d")
@@ -109,6 +126,9 @@ class Runner:
             m.restore(state["monitors"].get(m.name, {}))
 
     def finish(self, t):
+        self.drain()
+        for m in self.monitors:
+            m.finish(t)
         report.daily(self.run_dir, self.day or report.utc(t).strftime("%Y-%m-%d"), self.metrics(), self.events.all())
         self._write_summary(t)
         self.checkpoint(t)
@@ -201,9 +221,82 @@ class Bench:
         return {"sunlit": int(sunlit), "temp_c": round(temp, 1), "orbit": orbit.number(t)}
 
 
+class GroundStation(threading.Thread):
+    """The HackRF ground station: listens all the time (beacons), and runs a pass (PUSP link and turn handovers) in
+    each pass window of the schedule. Every frame heard and every pass go to the radio monitor through runner.post(),
+    and into frames.jsonl and passes.jsonl."""
+
+    def __init__(self, runner, config, passes, radio=None):
+        """radio: a hackrf.Radio to use instead of the HackRF (tests)."""
+        super().__init__(daemon=True)
+        import ccsds
+        import ground
+        import hackrf
+
+        r = config["radio"]
+        self.runner = runner
+        self.passes = passes
+        self.turns = r["turns_per_pass"]
+        if radio is None:
+            constants = ccsds.constants()
+            radio = hackrf.HackRF(constants["UHF_FREQ_HZ"], r["lna_db"], r["vga_db"], r["tx_vga_db"], r["serial"] or None)
+        self.ground = ground.Ground(radio, on_receive=self._heard)
+        self.frames = open(os.path.join(runner.run_dir, "frames.jsonl"), "a", buffering=1)
+        self.pass_log = os.path.join(runner.run_dir, "passes.jsonl")
+
+    def _heard(self, rx):
+        f = rx.frame
+        beacon = self.ground.is_beacon(rx)
+        record = {"time": report.iso(rx.t), "dir": "down", "beacon": beacon, "error": rx.error,
+                  "power_db": round(rx.power_db, 1), "offset_hz": round(rx.freq_offset_hz)}
+        if f is not None:
+            record.update(vc=f.vcid, count=f.vc_frame_count, apid=f.apid, seq=f.sequence_count, len=len(f.data),
+                          data=f.data.hex() if not beacon else None)
+        self.frames.write(json.dumps(record) + "\n")
+        self.runner.post(lambda: self.runner.radio.on_frame(rx.t, rx, beacon))
+
+    def run(self):
+        done = set()
+        p = self.passes
+        while not self.runner.stop.is_set():
+            now = time.time()
+            if p.in_pass(now) and p.number(now) not in done:
+                done.add(p.number(now))
+                remaining = p.pass_s - ((now - p.start - p.offset_s) % p.interval_s)
+                self.runner.post(lambda t=now, d=remaining: self.runner.radio.pass_started(t, d))
+                result = self.ground.run_pass(remaining, turns=self.turns)
+                with open(self.pass_log, "a") as f:
+                    f.write(json.dumps({"time": report.iso(result.start), "established": result.established,
+                                        "establish_s": result.establish_s, "turns_given": result.turns_given,
+                                        "turns_taken": result.turns_taken, "sent": result.sent, "resent": result.resent,
+                                        "received": len(result.received), "failure": result.failure}) + "\n")
+                self.runner.post(lambda r=result: self.runner.radio.on_pass(time.time(), r))
+            else:
+                self.ground.receive(0.2)
+
+    def close(self):
+        self.ground.radio.close()
+        self.frames.close()
+
+
 def live(runner, config, hours):
-    orbit, _ = schedule.from_config(config, runner.info["start"])
+    orbit, passes = schedule.from_config(config, runner.info["start"])
     bench = Bench(runner, config)
+    station = None
+    try:
+        if runner.radio is not None:
+            station = GroundStation(runner, config, passes)
+            station.start()
+        _live_loop(runner, config, hours, orbit, bench)
+    finally:
+        runner.stop.set()
+        if station is not None:
+            station.join(timeout=60)  # A pass in progress runs to the end of its window; closing the radio cuts it short
+            station.close()
+        bench.close()
+
+
+def _live_loop(runner, config, hours, orbit, bench):
     end = time.time() + hours * 3600 if hours else None
     last_env = last_capture = 0.0
     cap = config["capture"]
@@ -230,7 +323,6 @@ def live(runner, config, hours):
             bench.close()
         runner.tick(time.time())
         runner.stop.wait(1.0)
-    bench.close()
 
 
 def replay(runner, path, tick_s=1.0):
@@ -280,7 +372,12 @@ def main():
     with open(config_path, "rb") as f:
         config = tomllib.load(f)
 
-    runner = Runner(config, run_dir, info, stop_on_failure=args.stop_on_failure)
+    radio_constants = None
+    if config.get("radio", {}).get("enabled") and not args.replay:
+        import ccsds
+
+        radio_constants = ccsds.constants()  # Builds PVDXos's CCSDS code; fails here, not mid-run, if it can't
+    runner = Runner(config, run_dir, info, stop_on_failure=args.stop_on_failure, radio_constants=radio_constants)
     if state:
         runner.restore(state)
     signal.signal(signal.SIGTERM, lambda *_: runner.stop.set())

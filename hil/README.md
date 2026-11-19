@@ -194,9 +194,34 @@ login and restarts it if the runner crashes, and the run resumes from its checkp
 `events.jsonl`, `metrics.csv` (once a minute), and the full flatsat log as `rtt-YYYYMMDD.log`. A live run exits 0
 when it ends as asked, whatever it found; read `summary.md`.
 
-**Radio (next phase).** Real UHF uplink and downlink need the radio task (the `radio-task` branch, still changing) and
-a ground station: a second AT86RF215 running PVDXos's own radio, USLP and CFDP code, cabled to the flatsat through at
-least 60 dB of attenuation. The runner then adds downlink cadence and frame-count monitors, uplinks commands during
-simulated passes (`[passes]` in the config) and checks each is acknowledged in telemetry and in the log. To follow the
-radio code as it changes, the ground firmware compiles PVDXos's sources and the host reads its constants from PVDXos's
-headers, rather than keeping copies.
+**Radio.** With `[radio] enabled = true`, a HackRF ground station (`hil/lib/ground.py`) listens for the satellite's
+telemetry beacons all the time and, in each `[passes]` window, opens the UHF link (PUSP: SYN, SYN_ACK, SRT) and trades
+turns with it. Every frame heard goes to `frames.jsonl` and every pass to `passes.jsonl`, and the `radio` monitor fails
+on a beacon gap of more than 2.5 beacon periods outside passes, or a pass the satellite doesn't answer; missed bursts
+(VC frame count steps) and unreadable frames are warn events. Use a cabled link with at least 60 dB of attenuation.
+
+The ground speaks exactly what the satellite speaks, and follows it as the radio code changes:
+- `hil/lib/ccsds.py` builds PVDXos's own SPP, USLP and uplink-parser code for the Mac (`hil/lib/ccsds_host/`) and calls
+  it through ctypes; VC routes, APIDs, callsigns, PUSP directives and timings are read from PVDXos's sources. The radio
+  code is on the `radio-task` branch: point `PVDX_ROOT` at a checkout of it.
+- `hil/lib/mrfsk.py` is the 802.15.4g MR-FSK modem (2-FSK, 50 ksym/s, h = 0.5, BT 0.5, as in gr-ccsds's 2GFSK
+  flowgraph). It decodes uncoded frames only. Bit-order and FCS details the AT86RF215 datasheet leaves to IEEE 802.15.4g
+  are constants there, to confirm on the bench: a frame with a bad FCS but a good USLP CRC means the FCS guess is wrong.
+- `hil/lib/hackrf.py` drives the HackRF through `hackrf_transfer` (half duplex: each transmit stops and restarts the
+  receiver; the turnaround is recorded) and has an in-memory radio pair for tests.
+- `hil/lib/uplink.py` builds uplink command files, checked against PVDXos's own parser.
+
+`PVDX_ROOT=<radio-task checkout> pytest soak/tests` runs the framing, modem (with noise and frequency offset), PUSP
+(against a transcription of the satellite's state handlers, with lost directives) and ground-station tests offline.
+
+**Not working on hardware yet**, all waiting on the radio code:
+- The satellite sends FEC-coded frames (rate-1/2 RSC, SFD1); the modem only decodes uncoded ones, so beacons show up as
+  "FEC-coded frame" until the RSC encoder from IEEE 802.15.4g is added, or a soak build sends uncoded.
+- `uhf_rx_poll()` and `uhf_transmit_pusp()` are still dummies on `radio-task`, so no pass can open a link.
+- Uplinking commands needs a CFDP sender on the ground (the satellite receives uplink files over CFDP, which
+  `radio-task` is reworking), and checking them needs telemetry that reports each command back.
+
+**Firmware for a soak:** `make dev DEFINES="DEFAULT_LOG_LEVEL=INFO"` keeps the log volume down (DEBUG eventually drops
+lines), and `DEFINES="configINITIAL_TICK_COUNT=0xFFC91780"` starts FreeRTOS's tick an hour before it wraps, so the
+49.7-day rollover happens early in the run. The log-level override needs the `soak-radio` branch's `globals.h` change;
+the tick count works on any build.

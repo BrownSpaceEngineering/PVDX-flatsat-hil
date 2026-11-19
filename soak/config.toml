@@ -8,10 +8,20 @@ temp_min_c = -10.0
 temp_max_c = 35.0
 
 [passes]
-# Ground passes: the ground station transmits only inside them (phase 2; ignored until the ground station exists).
+# Ground passes: the ground station opens a link only inside them, and just listens (for beacons) in between.
 interval_s = 21600
 pass_s = 600
 offset_s = 300
+
+[radio]
+# The HackRF ground station (hil/lib/ground.py). Needs PVDX_ROOT pointing at PVDXos sources with the UHF radio task
+# (the radio-task branch), and a cabled RF link through at least 60 dB of attenuation.
+enabled = false
+lna_db = 24                                  # hackrf_transfer -l (RX LNA, 0-40 in 8 dB steps)
+vga_db = 20                                  # hackrf_transfer -g (RX VGA, 0-62 in 2 dB steps)
+tx_vga_db = 0                                # hackrf_transfer -x (TX VGA, 0-47)
+turns_per_pass = 2                           # Handovers each way in a pass
+serial = ""                                  # HackRF serial number, if more than one is plugged in
 
 [environment]
 update_s = 10                                # How often the tester's inputs follow the orbit

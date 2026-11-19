@@ -77,7 +77,7 @@ def test_a_healthy_hour_has_no_failures():
 
 def test_an_uncommanded_reset_fails():
     lines = healthy(T0, 600) + [(T0 + 600, "[INFO|main.c:199]: [+] Built from commit: abc1234")]
-    events = run_lines(lines)
+    events = run_lines(lines, end=T0 + 610)
     assert [e.monitor for e in fails(events)] == ["resets"]
 
 
@@ -86,13 +86,40 @@ def test_a_boot_at_the_start_of_the_run_is_not_a_reset():
     assert not fails(run_lines(lines))
 
 
+def test_the_reset_cause_is_reported_and_a_watchdog_reset_always_fails():
+    events = []
+    resets = monitors.Resets(events.append)
+    resets.on_line(T0, "[INFO|main.c:1]: [+] Built from commit: abc1234")
+    resets.on_line(T0, "[+] Reset cause: power-on (RCAUSE 0x01)")
+    resets.expect_reboot(T0 + 10)
+    resets.on_line(T0 + 20, "[INFO|main.c:1]: [+] Built from commit: abc1234")
+    resets.on_line(T0 + 20, "[+] Reset cause: watchdog (RCAUSE 0x20)")
+    assert [e.severity for e in events] == ["info", "fail"]
+    assert "power-on" in events[0].message and "watchdog" in events[1].message
+    assert resets.causes == {"power-on": 1, "watchdog": 1}
+
+
+def test_a_boot_without_a_reset_cause_is_judged_after_a_wait():
+    events = []
+    resets = monitors.Resets(events.append)
+    resets.on_line(T0, "tick")
+    resets.on_line(T0 + 1, "[+] Built from commit: abc1234")
+    resets.on_tick(T0 + 2)
+    assert not events
+    resets.on_tick(T0 + 10)
+    assert [e.severity for e in events] == ["fail"]
+
+
 def test_a_commanded_reboot_does_not_fail():
     events = []
     resets = monitors.Resets(events.append, reboot_grace_s=120)
+    resets.on_line(T0, "tick")
     resets.expect_reboot(T0)
     resets.on_line(T0 + 30, "[+] Built from commit: abc1234")
+    resets.on_tick(T0 + 40)
     assert not fails(events)
     resets.on_line(T0 + 400, "[+] Built from commit: abc1234")
+    resets.on_tick(T0 + 410)
     assert len(fails(events)) == 1, "a second boot after the grace period is uncommanded"
 
 
