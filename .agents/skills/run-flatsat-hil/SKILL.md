@@ -1,6 +1,6 @@
 ---
 name: run-flatsat-hil
-description: Build and flash the flatsat tester (a second Grand Central that emulates the S-band radio and perovskite board and drives the photodiode and thermistor inputs and the real perovskite board's pixels, and records the flatsat's digital outputs), and run the hil/ pytest suite against the flatsat. Use for hardware-in-the-loop tests, adding a test or emulated device, or debugging the tester.
+description: Build and flash the flatsat tester (a second Grand Central that emulates the S-band radio, perovskite board and fuel gauges and drives the photodiode and thermistor inputs and the real perovskite board's pixels, and records the flatsat's digital outputs), and run the hil/ pytest suite against the flatsat. Use for hardware-in-the-loop tests, adding a test or emulated device, or debugging the tester.
 ---
 
 # Flatsat hardware-in-the-loop rig
@@ -21,12 +21,13 @@ Read `flatsat-hil/hil/README.md` first: it has the wiring and what each test cov
     (load `tester.atzip`), export, and replace `ASF/` and `tester.atzip`; don't edit it by hand. START miscalculates
     DPLL0 as 360 MHz, so the Makefile passes the real 120 MHz frequency constants. START's SPI slave defaults to
     CPHA 1; `buses.c` sets mode 0 at startup.
-  - The one register-level part is the two I2C targets the flatsat talks to (`i2c_slave.c`, with `sercom.c` for
-    SERCOM3/6 clocks and interrupts): they decide ACK/NACK per address, produce each read byte on demand and can hold
+  - The one register-level part is the I2C targets the flatsat talks to (`i2c_slave.c`, with `sercom.c` for the
+    clocks and interrupts of SERCOM3/6 and the fuel gauges' SERCOM0/1/4/5): they decide ACK/NACK per address, produce each read byte on demand and can hold
     the bus, which ASF's I2C slave driver can't. Pin allocation is in `ASF/atmel_start_pins.h`, `tester/src/board.h`
     (ASF PINMUX_ values) and `analog_out.c`.
   - Bus bindings: `buses.c`. Device models (in `common/`): `stxg2_model.c`, `pmb_model.c`, `mcp23017_model.c`,
-    `ina226_model.c` + `pixel_model.c` (the emulated perovskite board, wired in place of the real one). With the real
+    `ina226_model.c` + `pixel_model.c` (the emulated perovskite board, wired in place of the real one),
+    `max17205_model.c` (the four fuel gauges, one target per channel of the flatsat's mux, wired in place of the EPS's). With the real
     board, the tester drives cells on 4 of its pixels instead (pvd0-3: PWM behind a resistor, `PVD_PIXELS` in
     `hil/lib/tester.py`). The tester's outputs are phd0-3, pvd0-3 and therm0-3 (`analog_out.c`).
   - Host commands: `common/cmd.c`, documented in `hil/lib/tester.py`.

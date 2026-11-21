@@ -31,6 +31,7 @@ void platform_link_write(const char *buf, size_t len);
 // Holds SCL low at the next address match on that bus (a hung device), until called with false
 void platform_hold_pmb_bus(bool hold);
 void platform_hold_stxg2_bus(bool hold);
+void platform_hold_fg_bus(uint8_t pack, bool hold); // The fuel gauge on mux channel `pack` (0-3)
 
 // Whether the flatsat has the S-band radio powered (SBAND_EN high) and out of reset (SBAND_RST high). Interrupt-safe
 bool platform_stxg2_powered(void);

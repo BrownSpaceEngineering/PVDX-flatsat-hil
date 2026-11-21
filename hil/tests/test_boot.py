@@ -25,7 +25,7 @@ def test_rig_devices_pass_their_checks(nominal, flatsat):
     "mode, warning",
     [
         ("nack", r"stxg2: no answer on I2C"),
-        ("bad_id", r"stxg2: bad ID 0xdeadbeef"),
+        ("bad_id", r"stxg2: bad ID 0x(?i:deadbeef)"),  # The flatsat's printf writes hex in capitals
         ("hold_bus", r"stxg2: (no answer on I2C|ID read failed)"),
     ],
 )
@@ -76,5 +76,6 @@ def test_dark_and_cold_environment_boots(tester, flatsat):
     mark = flatsat.boot()
     checks = flatsat.device_checks(mark)
     assert checks.get("PHOTODIODE_ID"), "a dark array should pass its check (eclipse is normal)"
-    assert flatsat.find_all(r"photodiode check: no channel above the light floor", mark)
+    assert flatsat.find_all(r"photodiode check: no channel above the light floor", mark), \
+        "a lit channel in the dark: the 14 photodiode inputs the tester doesn't drive must be tied to ground"
     assert booted_to_scheduler(flatsat, mark)

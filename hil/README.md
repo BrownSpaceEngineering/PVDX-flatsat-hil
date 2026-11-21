@@ -8,15 +8,16 @@ are in this repo; `src/...` paths, `make dev` and the other `make` targets are P
 reads the flatsat's sources and `src/PVDXos.elf` from the PVDX checkout around it (or from `$PVDX_ROOT`).
 
 - **Emulated devices:** the S-band radio (STXG2): control over I2C, data over SPI. The perovskite measurement board
-  (MCP23017 and INA226 over I2C, with a model of its 16 pixels), wired in place of the real one.
+  (MCP23017 and INA226 over I2C, with a model of its 16 pixels), wired in place of the real one. The four battery fuel
+  gauges (MAX17205), one on each channel of the flatsat's own TCA9546A mux, wired in place of the EPS's.
 - **Driven inputs:** 4 photodiode voltages, 4 thermistor voltages, and 4 perovskite cells on the flatsat's real
   perovskite measurement board (PVDX-ADCS-PMB).
 
 - **Recorded outputs:** the magnetorquer H-bridges (IN1, IN2, nSLEEP per axis), heaters, burn wire and S-band EN/RST,
   all 14 at once, each edge timed to about 1 us (`tester/src/watch.c`).
 
-The real gyro, magnetometer, MRAM, camera, display, UHF radio and EPS (fuel gauges, batteries) stay connected. The
-suite checks that they read plausibly.
+The real gyro, magnetometer, MRAM, camera, display, UHF radio and batteries stay connected, and the EPS's fuel gauges
+unless the emulated ones are wired. The suite checks that they read plausibly.
 
 The host suite (`pytest`) talks to the tester over SEGGER RTT through a second J-Link on the tester's SWD header
 (`lib/tester.py`), and reads the PVDXos RTT log through the flatsat's J-Link (`lib/flatsat.py`). It asserts on both,
@@ -57,8 +58,10 @@ output stays high impedance until the suite arms it, and disconnects when the su
 Every PWM line into a flatsat ADC needs an RC filter (10 kΩ in series, then 1 µF to ground on the flatsat side): the
 flatsat averages only 4 instantaneous samples, so raw PWM reads as 0, 1023, 2047, 3071 or 4095. Nothing else may load
 those pins: take the flatsat's own thermistors and their divider resistors, and anything else on PHD_x, off the pins the
-tester drives (the expected voltages are the divider node's, `models.thermistor_volts`). The cells need only the
-series resistor, because the perovskite board's INA226 integrates over each conversion.
+tester drives (the expected voltages are the divider node's, `models.thermistor_volts`). Tie the other 14 photodiode
+inputs to ground: left floating they read as lit, so the flatsat never sees eclipse, which `test_boot.py`'s dark start
+and `test_state_machine.py` need. The cells need only the series resistor, because the perovskite board's INA226
+integrates over each conversion.
 
 | From | To | Through | Signal |
 |---|---|---|---|
@@ -100,6 +103,21 @@ the flatsat's 3V3 is).
 | Flatsat I2C_SENSORS SCL (PD08) | Tester D21/SCL (PB21) | |
 | Flatsat PVD DAC (PA02) | Tester A7 (PB04) | Pixel voltage: the tester applies the PMB's divider, x 12/33 |
 
+**Emulated fuel gauges**, instead of the EPS's. The flatsat's TCA9546A mux (0x70, on the compute board) stays in
+circuit; the tester answers as the gauge (0x36 and 0x0B) on each of its four downstream channels, SDn/SCn on the
+compute board's EPS header. Disconnect the EPS's gauges from those eight lines (both would answer), and keep the
+batteries' power wiring as it is. The channels are pulled up on the compute board; the tester also turns on its weak
+internal pull-ups, which only matter if a channel is left unwired. The tests that need these are in
+`test_fuel_gauges.py`; the fuel gauge tests in `test_real_devices.py` need the EPS's. Each checks after boot which
+gauges answered, and skips if it's the other ones.
+
+| From | To | Signal |
+|---|---|---|
+| Flatsat SD0 / SC0 (mux channel 0) | Tester D37 (PA16) / D36 (PA17) | Pack 0's gauge, SERCOM1 |
+| Flatsat SD1 / SC1 (mux channel 1) | Tester D30 (PA23) / D31 (PA22) | Pack 1's gauge, SERCOM5 |
+| Flatsat SD2 / SC2 (mux channel 2) | Tester D18 (PB12) / D19 (PB13) | Pack 2's gauge, SERCOM4 |
+| Flatsat SD3 / SC3 (mux channel 3) | Tester D1 (PB24) / D0 (PB25) | Pack 3's gauge, SERCOM0 |
+
 ## Wiring: flatsat outputs to tester
 
 Each output goes to its own tester input, through 1 kΩ in series so a powered flatsat never feeds an unpowered tester.
@@ -133,13 +151,14 @@ can use a J-Link at a time, so stop any GDB server or RTT viewer on either probe
 |---|---|
 | `test_boot.py` | The S-band, perovskite, photodiode and thermistor startup checks pass. Each emulated S-band and perovskite-board fault (NACK, bad ID, held bus) fails its check without stopping the boot. A dark, cold start boots. |
 | `test_photodiodes.py` | PHD_0, 5, 10 and 15 each read their own voltage (catches swapped wires and `PHD_CFG` mistakes). |
-| `test_thermal.py` | The thermistor check reads the simulated temperatures. An open thermistor fails it. Heater hysteresis and partner fallback are tested on the heater lines. |
+| `test_thermal.py` | The thermistor check reads the simulated temperatures. One open thermistor is reported but passes it (its partner stands in); all four open fail it. Heater hysteresis and partner fallback are tested on the heater lines. |
 | `test_magnetorquers.py` | IN1 and IN2 never both high (brake). 1 kHz PWM within each burst. Each burst's duty matches the duty ADCS logged for it, in order. nSLEEP rises at least t_wake before each burst and drops between bursts. Manual: B-dot reverses with rotation. |
 | `test_perovskite_emulated.py` | A full sweep on the emulated perovskite board: each logged step matches the pixel the tester had routed, the current it served and the follower voltage it measured, one pixel at a time, every pixel visited, up to 1.2 V. A never-ready INA226 fails each pixel after a few steps, and a stuck MCP23017 latch is caught. The host's pixel model matches the tester's. |
 | `test_perovskite.py` | A full sweep on the real perovskite board: each cell pixel follows its IV line (Voc, Isc, and the slope, which checks the pixel voltage the flatsat logs), the other pixels read open, and dark cells follow -V/R. |
 | `test_sband.py` | ID and scratchpad. EN/RST power sequencing. The driver only talks to the radio while it's powered and out of reset, and only touches registers the radio has, in modes that accept them. |
-| `test_state_machine.py` | IDLE, FAKE_HEARTBEAT, IDLE, PEROVSKITE_CAPTURE timing. |
-| `test_real_devices.py` | Real devices pass their checks. The magnetometer reads the Earth's field and the gyro reads still. The fuel gauges report a battery level. |
+| `test_state_machine.py` | IDLE, FAKE_HEARTBEAT, IDLE, PEROVSKITE_CAPTURE timing, in eclipse. |
+| `test_fuel_gauges.py` | With the emulated gauges: each pack reads what its own gauge served (catches mux channel mix-ups), the battery level is the lowest pack, and the flatsat never writes a gauge. A dead gauge is left out of the level; with none the battery reads full. A low battery takes the state machine to LOW_POWER_IDLE and a recovered one back to IDLE. A gauge holding the bus doesn't stop the flatsat, which reads every pack again once it lets go. |
+| `test_real_devices.py` | Real devices pass their checks (the display has none: it is write-only). The magnetometer reads the Earth's field and the gyro reads still, from the sensor line ADCS logs every ~5 s. With the EPS's gauges wired, they pass their check and report a battery level. |
 | `test_burn.py` | The burn pin stays low once burned. A short-wait build fires exactly one pulse of the logged length, and resumes its wait after a reset. |
 | `test_uhf.py` | With a HackRF: UHF beacons are on the air. |
 
@@ -151,7 +170,8 @@ when it lands:
 - **Thermistor task:** no state enables the thermistor task.
 - **S-band data path:** nothing calls `stxg2_store()` yet.
 
-**Not covered:** low-battery behaviour. The fuel gauges and batteries are real, so the rig can't set the battery level.
+**Not covered:** the fuel gauges' shared ALRT line (EPS IRQ), which the tester doesn't drive, so the alert scan
+(`fg_scan_alerts()`) isn't exercised.
 
 ## Soak test (`soak/`)
 

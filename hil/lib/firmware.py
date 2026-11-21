@@ -15,5 +15,13 @@ def state_ids():
     return {name: i for i, name in enumerate(names)}
 
 
+def battery_thresholds():
+    """(LOW_BATTERY_LEVEL, RECOVERED_BATTERY_LEVEL) from src/states.c, as 0-1 fractions of a full battery."""
+    with open(os.path.join(PVDX, "src", "states.c")) as f:
+        text = f.read()
+    return tuple(float(re.search(rf"#define\s+{name}\s+([\d.]+)", text).group(1))
+                 for name in ("LOW_BATTERY_LEVEL", "RECOVERED_BATTERY_LEVEL"))
+
+
 TRANSITION = r"state_machine: state (\d+) -> state (\d+)"
 DEVICE_CHECK_TIMEOUT_S = 60

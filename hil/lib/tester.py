@@ -13,8 +13,10 @@ Every command is one line; every reply is one JSON object with "ok". The command
     pmb get                            MCP23017 / INA226 emulator state, PVD_CRNT voltage
     pmb log <from>                     CURRENT register reads the flatsat made: [selected mask, follower mV, nA]
     stxg2 get                          S-band emulator state and SPI statistics
+    fg get                             fuel gauge emulator state: per pack, I2C statistics and the main registers
+    fg set <0-3|all> <reg> <value>     a fuel gauge register (MAX17205 address, 16-bit value; 0x prefix allowed)
     fault <device> <mode>              stxg2 none|nack|bad_id|hold_bus|mode_nack, ina226 none|nack|no_cvrf|bad_id,
-                                       mcp23017 none|nack|stuck, pmb_bus none|hold_bus
+                                       mcp23017 none|nack|stuck, pmb_bus none|hold_bus, fg0-fg3 none|nack|hold_bus
     reset                              emulators to power-on, faults cleared, outputs 0 V, pixels dark
     watch start|stop|get               record the flatsat's digital outputs: edges stream on RTT channel 2 (lib/logic.py)
     bootloader                         reboot into the UF2 bootloader (Grand Central only)
@@ -26,6 +28,7 @@ import json
 import threading
 import time
 
+import models
 import rtt
 
 PHOTODIODE_CHANNELS = (0, 5, 10, 15)  # phdN drives the flatsat's PHD_<PHOTODIODE_CHANNELS[N]>
@@ -218,6 +221,15 @@ class Tester:
 
     def fault(self, device, mode):
         self.command(f"fault {device} {mode}")
+
+    def set_pack(self, pack, soc_pct, volts, amps, temp_c):
+        """The state the emulated fuel gauge on mux channel `pack` reports: charge %, pack volts, amps, degrees C."""
+        for reg, value in models.fuel_gauge_registers(soc_pct, volts, amps, temp_c).items():
+            self.command(f"fg set {pack} {reg:#x} {value:#x}")
+
+    def fuel_gauges(self):
+        """Per pack: fault, I2C transactions and nacks, words read and written, and the main registers."""
+        return self.command("fg get")["packs"]
 
 
     def enter_bootloader(self):

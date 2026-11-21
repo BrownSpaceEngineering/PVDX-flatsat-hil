@@ -28,10 +28,18 @@ def test_device_check_reads_the_simulated_temperatures(tester, flatsat):
     assert flatsat.device_checks(mark).get("THERMISTOR_ID")
 
 
-def test_open_thermistor_fails_the_device_check(tester, flatsat):
+def test_one_open_thermistor_is_reported_but_passes_the_check(tester, flatsat):
+    """The heater control stands a pair partner in for a broken thermistor, so only losing all four fails the check."""
     set_environment(tester, temps_c=(20.0, None, 20.0, 20.0))
     mark = flatsat.boot()
     assert flatsat.find_all(r"thermistor check: T1 code \d+ railed", mark)
+    assert flatsat.device_checks(mark).get("THERMISTOR_ID")
+
+
+def test_all_thermistors_open_fail_the_device_check(tester, flatsat):
+    set_environment(tester, temps_c=(None,) * 4)
+    mark = flatsat.boot()
+    assert flatsat.find_all(r"thermistor check: no thermistor reads", mark)
     assert flatsat.device_checks(mark).get("THERMISTOR_ID") is False
 
 

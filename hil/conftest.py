@@ -4,7 +4,8 @@
 - flatsat: the flight computer over its J-Link: reset, RTT log (hil/lib/flatsat.py). With two J-Links plugged in,
            lib/rtt.py tells them apart (or set HIL_FLATSAT_JLINK / HIL_TESTER_JLINK to their serial numbers)
 - logic:   the flatsat's digital outputs, recorded by the tester (hil/lib/logic.py)
-- nominal: a benign environment (sunlit photodiodes, 20 C, lit perovskite cells and emulated pixels), armed
+- nominal: a benign environment (sunlit photodiodes, 20 C, lit perovskite cells and emulated pixels, charged emulated
+           fuel gauges), armed
 
 A fixture whose hardware is missing skips the tests that use it.
 """
@@ -13,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 
 import pytest
 
@@ -31,6 +33,13 @@ NOMINAL_TEMP_C = 20.0
 # only sinks current) so both current directions are measured
 NOMINAL_PVD_VOCS = (0.9, 0.6, 0.3, 0.0)
 DARK = (0.0,) * 4  # For photodiodes= or pvds=
+# While nothing reads the flatsat's log its RTT buffer fills, and the firmware reports the lines it lost in one "[!] N log
+# lines dropped" line once the reader catches up. This long after connecting, that report is in, so it doesn't fail the
+# first test.
+LOG_BACKLOG_S = 2.0
+# The emulated fuel gauges, one per mux channel: (charge %, pack V, A, degrees C), distinct so a mixed-up channel shows.
+# Charging, well above the state machine's low-battery level.
+NOMINAL_PACKS = ((82.0, 7.90, 0.40, 21.0), (78.0, 7.85, 0.35, 22.5), (74.0, 7.80, 0.30, 19.5), (70.0, 7.75, 0.25, 18.0))
 
 
 @pytest.fixture(scope="session")
@@ -74,6 +83,7 @@ def flatsat():
         f = Flatsat(serial_number=flatsat_serial)
     except Exception as e:  # No J-Link, or it can't reach the target
         pytest.skip(f"flatsat not reachable over J-Link: {e}")
+    time.sleep(LOG_BACKLOG_S)
     yield f
     f.close()
 
@@ -97,8 +107,11 @@ def logic(tester_session):
 
 
 def set_environment(tester, photodiodes=NOMINAL_PHOTODIODE_VOLTS, temps_c=(NOMINAL_TEMP_C,) * 4, pvds=NOMINAL_PVD_VOCS,
-                    pixels=True):
-    """pvds: the cells on the real perovskite board; pixels: whether the emulated board's pixels are lit."""
+                    pixels=True, packs=NOMINAL_PACKS):
+    """pvds: the cells on the real perovskite board; pixels: whether the emulated board's pixels are lit; packs: what
+    the emulated fuel gauges report (see NOMINAL_PACKS)."""
+    for pack, state in enumerate(packs):
+        tester.set_pack(pack, *state)
     tester.set_photodiodes(photodiodes)
     tester.set_thermistors([models.thermistor_volts(t) if t is not None else models.OPEN_VOLTS for t in temps_c])
     tester.set_pvds(pvds)
@@ -117,6 +130,16 @@ def skip_unless_perovskite_board(tester, emulated):
     if wired != emulated:
         pytest.skip("the tester's emulated perovskite board is wired, not the real one" if wired
                     else "the real perovskite board is wired, not the tester's emulated one")
+
+
+def skip_unless_fuel_gauges(tester, emulated):
+    """Call after a boot (whose device checks read every fuel gauge). Skips the test if the other fuel gauges are the
+    ones wired to the flatsat's mux: the emulated ones see I2C traffic (ACKed or, under a fault, NACKed), the EPS's
+    real ones leave the emulator's counters at 0."""
+    wired = any(p["transactions"] + p["nacks"] > 0 for p in tester.fuel_gauges())
+    if wired != emulated:
+        pytest.skip("the tester's emulated fuel gauges are wired, not the EPS's" if wired
+                    else "the EPS's real fuel gauges are wired, not the tester's emulated ones")
 
 
 @pytest.fixture
