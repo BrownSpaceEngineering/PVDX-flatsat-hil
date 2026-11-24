@@ -2,7 +2,8 @@
 testing the ground's protocol code without hardware.
 
 A radio sends PSDUs (the satellite's USLP frames; the modem appends the FCS) and delivers received mrfsk.Received
-frames on a queue. The HackRF can't receive while it transmits: send() stops the receiver, transmits, and restarts it,
+frames on a queue. The HackRF decodes coded frames with the satellite's code (mrfsk.check_phy()) and sends uncoded
+frames unless given tx_code, since the satellite receives both. The HackRF can't receive while it transmits: send() stops the receiver, transmits, and restarts it,
 which takes a few hundred milliseconds of USB setup each way. PUSP's retry period (UHF_RETRY_MS) has to cover that;
 the turnaround is measured and reported so it can be checked against it on the bench.
 
@@ -38,10 +39,14 @@ class Radio:
 
 
 class HackRF(Radio):
-    def __init__(self, freq_hz, lna_db=24, vga_db=20, tx_vga_db=0, serial=None):
+    def __init__(self, freq_hz, lna_db=24, vga_db=20, tx_vga_db=0, serial=None, code=mrfsk.RSC, interleaved=False,
+                 tx_code=None):
         if shutil.which("hackrf_transfer") is None:
             raise FileNotFoundError("hackrf_transfer not found: install the HackRF tools (brew install hackrf)")
         self.freq_hz = freq_hz
+        self.code = code  # What coded frames are decoded with
+        self.interleaved = interleaved
+        self.tx_code = tx_code  # What the ground codes its frames with, or None to send them uncoded
         self.rx_gains = ["-l", str(lna_db), "-g", str(vga_db)]
         self.tx_gain = ["-x", str(tx_vga_db)]
         self.device = ["-d", serial] if serial else []
@@ -56,7 +61,7 @@ class HackRF(Radio):
         return self.device + ["-f", str(self.freq_hz), "-s", str(mrfsk.SAMPLE_RATE)]
 
     def _start_rx(self):
-        demod = mrfsk.Demodulator()
+        demod = mrfsk.Demodulator(code=self.code, interleaved=self.interleaved)
         proc = subprocess.Popen(["hackrf_transfer", "-r", "-"] + self._common() + self.rx_gains, stdout=subprocess.PIPE,
                                 stderr=subprocess.DEVNULL)
 
@@ -81,7 +86,7 @@ class HackRF(Radio):
             self.proc = None
 
     def send(self, psdu):
-        iq = mrfsk.modulate(mrfsk.frame_bits(psdu))
+        iq = mrfsk.modulate(mrfsk.frame_bits(psdu, self.tx_code, self.interleaved))
         tail = np.zeros(mrfsk.SPS * 32, dtype=complex)  # Let the last symbols leave the DAC before the stream ends
         data = mrfsk.to_hackrf(np.concatenate([iq, tail]))
         with self.lock:

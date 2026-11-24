@@ -25,8 +25,14 @@ def reboot(kind=0):
     return command("REBOOT", struct.pack(">B", kind))
 
 
-def enable_disable_device(device_id):
-    return command("ENABLE_DISABLE_DEVICE", struct.pack(">H", device_id))
+def enable_disable_device(device_id, enabled):
+    """device_id is a device_id_t (src/globals.h); enabled is 1 to enable, 0 to disable."""
+    return command("ENABLE_DISABLE_DEVICE", struct.pack(">HB", device_id, 1 if enabled else 0))
+
+
+def set_adcs_op_mode(mode):
+    """mode is a tel_adcs_opmode_t, e.g. ccsds.constants()["TEL_ADCS_OPMODE_DETUMBLE_ONLY"]."""
+    return command("SET_ADCS_OP_MODE", struct.pack(">H", mode))
 
 
 def build(commands, timestamp):

@@ -5,8 +5,9 @@ info: a recovery or a milestone) and keeps counters for the metrics and reports.
 caller (wall-clock seconds), so a recorded log can be replayed through them (run.py --replay). Their state() is JSON
 and restore() takes it back, so a restarted runner carries on where it stopped.
 
-Most monitors watch the RTT log and the tester's edge captures; RadioLink watches the UHF link from the HackRF ground
-station (hil/lib/ground.py), when the run has one.
+Most monitors watch the RTT log and the tester's edge captures. With a HackRF ground station (hil/lib/ground.py),
+RadioLink watches the UHF link, Uplinks follows each uplinked command until the satellite's telemetry shows it was
+carried out, and Telemetry checks every decoded beacon against the flatsat's own log.
 """
 
 import re
@@ -24,6 +25,11 @@ TRANSITION = re.compile(firmware.TRANSITION)
 SWEEP_DONE = re.compile(r"perovskite: Sweep #(\d+) done, (\d+) steps failed")
 SWEEP_FAILED = re.compile(r"perovskite: (Sweep not saved|Every step failed|Hardware initialization failed)")
 BATTERY = re.compile(r"fuel_gauge: battery level (-?\d+)/1000")
+FUEL_PACK = re.compile(r"fuel_gauge: pack (\d+) SOC=(-?\d+) m%\s+Vpack=(-?\d+) mV\s+I=(-?\d+) mA\s+T=(-?\d+) mC")
+ADCS_MODE = re.compile(r"adcs: mode set to (do point|detumble only)")
+UTC_SET = re.compile(r"adcs: UTC set to (\d+)")
+# How the satellite says it ignored an uplinked command: radio-task logs it, main only logs that its task is missing
+NOT_IMPLEMENTED = re.compile(r"uplink: command type (\d+) not implemented|uplink: command \d+ \(type (\d+)\) not sent")
 NUMBERS = re.compile(r"\b0x[0-9a-fA-F]+\b|(?<![A-Za-z_])-?\d+(\.\d+)?\b")  # Values, not names like I2C
 
 
@@ -369,9 +375,21 @@ class RadioLink(Monitor):
         self.passes_failed = 0
         self.power_db = None
         self.freq_offset_hz = None
+        self.fec = {}  # How coded frames were decoded ("viterbi", "systematic:0", ...) -> count
+        self.corrected_bits = 0  # Coded bits the Viterbi decoder corrected, in all
+        self.decoded_bits = 0
 
     def on_frame(self, t, rx, is_beacon):
         self.power_db, self.freq_offset_hz = rx.power_db, rx.freq_offset_hz
+        if rx.coded:
+            kind = rx.fec.split(":")[0] if rx.fec else "failed"
+            if kind == "systematic" and kind not in self.fec:
+                self.event(t, "info", "coded frames are read from their systematic bits: the RSC variant in mrfsk.py "
+                                      "isn't confirmed yet (run soak/tools/fit_rsc.py on this run's coded.jsonl)")
+            self.fec[kind] = self.fec.get(kind, 0) + 1
+            if rx.corrected_bits is not None and rx.coded_bits is not None:
+                self.corrected_bits += rx.corrected_bits
+                self.decoded_bits += len(rx.coded_bits)
         if rx.error:
             self.bad[rx.error] = self.bad.get(rx.error, 0) + 1
             if self.bad[rx.error] == 1:
@@ -423,11 +441,217 @@ class RadioLink(Monitor):
         return {"beacons": self.beacons, "beacon_bursts": self.bursts, "missed_bursts": self.missed_bursts,
                 "unreadable_frames": sum(self.bad.values()), "passes": self.passes, "passes_failed": self.passes_failed,
                 "rx_power_db": None if self.power_db is None else round(self.power_db, 1),
-                "rx_offset_hz": None if self.freq_offset_hz is None else round(self.freq_offset_hz)}
+                "rx_offset_hz": None if self.freq_offset_hz is None else round(self.freq_offset_hz),
+                "fec_viterbi": self.fec.get("viterbi", 0), "fec_systematic": self.fec.get("systematic", 0),
+                "fec_failed": self.fec.get("failed", 0),
+                # Coded bits in error before correction: the link's margin, long before frames start failing
+                "fec_bit_error_rate": round(self.corrected_bits / self.decoded_bits, 6) if self.decoded_bits else None}
 
     def state(self):
         return {"beacons": self.beacons, "bursts": self.bursts, "missed_bursts": self.missed_bursts, "bad": self.bad,
-                "passes": self.passes, "passes_failed": self.passes_failed}
+                "passes": self.passes, "passes_failed": self.passes_failed, "fec": self.fec,
+                "corrected_bits": self.corrected_bits, "decoded_bits": self.decoded_bits}
+
+
+# Telemetry health field of each device that has one (device_id_t name -> tel_downlink_t field)
+HEALTH_FIELD = {"GYROSCOPE_ID": "gyro.health", "CAMERA_ID": "camera.health", "DISPLAY_ID": "display_health",
+                "UHF_ID": "uhf_health", "SBAND_ID": "sband.health"}
+
+
+class Uplinks(Monitor):
+    """Each uplinked command file (soak/uplinks.py) and what it should change, followed until a beacon shows it.
+
+    A transfer the satellite doesn't finish fails at once. Commands take effect by the time the pass ends (radio-task
+    holds most until uplink_commands_pass_exit()), so each check must pass in a beacon heard within settle_s of the
+    pass ending, or it fails: the file's timestamp appears in command_timestamps; SET_UNIX_TIME sets UTC-valid and a
+    timestamp within the beacon's age of the ground's clock; SET_ADCS_OP_MODE shows in adcs.opmode;
+    ENABLE_DISABLE_DEVICE shows in the device's health field. A command the satellite logs as not implemented is a warn
+    event instead (once per command type)."""
+
+    name = "uplink"
+
+    def __init__(self, emit, constants, settle_s, beacon_age_s):
+        super().__init__(emit)
+        self.c = constants
+        self.settle_s = settle_s
+        self.time_tolerance_s = beacon_age_s + 5  # A burst repeats the telemetry it collected when it started
+        self.pending = []  # {"what", "deadline", ...} checks not yet seen in telemetry
+        self.last_seen = {}  # what -> the last value seen, for the failure message
+        self.sent = 0
+        self.failed = 0
+        self.confirmed = 0
+        self.unconfirmed = 0
+        self.not_implemented = []  # Command type numbers the satellite said it ignored
+        self.delivery_warned = False
+
+    def on_pass(self, t, report, commands, file_timestamp):
+        uplink = report.uplink
+        if uplink is None:
+            return
+        self.sent += 1
+        names = ", ".join(cmd["name"] for cmd in commands)
+        if not uplink.succeeded:
+            self.failed += 1
+            self.event(t, "fail", f"uplink {uplink.seq} ({names}) not finished: {report.failure or 'no Finished'}",
+                       uplink.events)
+            return
+        self.event(t, "info", f"uplink {uplink.seq} ({names}) finished in {uplink.turns} turns, "
+                              f"{uplink.resent_pdus} PDUs re-sent", uplink.events)
+        if uplink.delivery_incomplete and not self.delivery_warned:
+            self.delivery_warned = True
+            self.event(t, "warn", "the satellite's Finished says delivery incomplete for a file it received whole: "
+                                  "cfdp_send_fin() sends delivery_complete, which only a send transaction ever sets")
+        deadline = t + self.settle_s
+        self.pending.append({"what": "command_timestamps", "deadline": deadline, "value": file_timestamp,
+                             "after": t, "label": f"uplink {uplink.seq} in command_timestamps"})
+        for cmd in commands:
+            check = dict(cmd, deadline=deadline, after=t)
+            if cmd["name"] == "SET_UNIX_TIME":
+                check.update(what="utc", label="UTC set (UTC-valid flag and the ground's time)")
+            elif cmd["name"] == "SET_ADCS_OP_MODE":
+                check.update(what="adcs.opmode", label=f"ADCS opmode {cmd['value']}")
+            elif cmd["name"] == "ENABLE_DISABLE_DEVICE":
+                field_name = HEALTH_FIELD.get(cmd["device_name"])
+                if field_name is None:
+                    self.event(t, "info", f"{cmd['device_name']} has no health field in telemetry to check")
+                    continue
+                want = "TEL_DEVICE_STATUS_OK" if cmd["enabled"] else "TEL_DEVICE_STATUS_DISABLED"
+                check.update(what=field_name, value=self.c[want],
+                             label=f"{cmd['device_name']} {'enabled' if cmd['enabled'] else 'disabled'} ({field_name})")
+            else:
+                continue
+            self.pending.append(check)
+
+    def _holds(self, t, check, tel):
+        what = check["what"]
+        if what == "command_timestamps":
+            self.last_seen[what] = tel["command_timestamps"][:3]
+            return check["value"] in tel["command_timestamps"]
+        if what == "utc":
+            valid = bool(tel["adcs.flags"] & self.c["TEL_ADCS_FLAG_UTC_VALID"])
+            self.last_seen[what] = {"utc_valid": valid, "timestamp": tel["timestamp"], "ground": round(t)}
+            return valid and abs(tel["timestamp"] - t) <= self.time_tolerance_s
+        self.last_seen[what] = tel[what]
+        return tel[what] == check["value"]
+
+    def on_telemetry(self, t, tel):
+        keep = []
+        for check in self.pending:
+            if t >= check["after"] and self._holds(t, check, tel):
+                self.confirmed += 1
+                self.event(t, "info", f"confirmed in telemetry: {check['label']}")
+            else:
+                keep.append(check)
+        self.pending = keep
+
+    def on_line(self, t, text):
+        match = NOT_IMPLEMENTED.search(text)
+        if not match:
+            return
+        kind = int(match.group(1) or match.group(2))
+        dropped = [c for c in self.pending if self.c.get(c.get("name", "")) == kind]
+        if dropped:
+            self.pending = [c for c in self.pending if c not in dropped]
+            if kind not in self.not_implemented:
+                self.not_implemented.append(kind)
+                self.event(t, "warn", f"the satellite ignored {dropped[0]['name']}: not implemented in this build", [text])
+
+    def on_tick(self, t):
+        keep = []
+        for check in self.pending:
+            if t > check["deadline"]:
+                self.unconfirmed += 1
+                self.event(t, "fail", f"never seen in telemetry within {self.settle_s:.0f} s of the pass: "
+                                      f"{check['label']} (last seen: {self.last_seen.get(check['what'])})")
+            else:
+                keep.append(check)
+        self.pending = keep
+
+    def metrics(self):
+        return {"uplinks": self.sent, "uplinks_failed": self.failed, "uplink_checks_confirmed": self.confirmed,
+                "uplink_checks_failed": self.unconfirmed}
+
+    def state(self):
+        return {"pending": self.pending, "sent": self.sent, "failed": self.failed, "confirmed": self.confirmed,
+                "unconfirmed": self.unconfirmed, "not_implemented": self.not_implemented,
+                "delivery_warned": self.delivery_warned}
+
+
+class Telemetry(Monitor):
+    """Each decoded beacon against what the flatsat logged around it: the fuel gauge readings, the state machine's
+    state, the boot time and the UHF radio's own health. Telemetry that disagrees with the log is a warn event (the
+    first time for each kind of mismatch; all are counted)."""
+
+    name = "telemetry"
+    EPS_TOLERANCE = {"charge_percent": 1.0, "voltage": 0.05, "current": 0.05, "temperature": 1.0}  # %, V, A, degC
+    LOG_FRESH_S = 30  # A fuel gauge log line older than this isn't compared
+
+    def __init__(self, emit, constants, beacon_age_s):
+        super().__init__(emit)
+        self.c = constants
+        self.beacon_age_s = beacon_age_s
+        self.packs = {}  # pack -> (t, {field: value in telemetry units})
+        self.states = []  # (t, state id) of recent transitions
+        self.boot_t = None
+        self.last = None  # (t, timestamp, boot_timestamp) of the previous beacon
+        self.decoded = 0
+        self.mismatches = {}  # kind -> count
+
+    def on_line(self, t, text):
+        if BOOT.search(text):
+            self.boot_t = t
+            self.states = []
+            return
+        match = FUEL_PACK.search(text)
+        if match:
+            pack, soc, mv, ma, mc = (int(x) for x in match.groups())
+            self.packs[pack] = (t, {"charge_percent": soc / 1000, "voltage": mv / 1000, "current": ma / 1000,
+                                    "temperature": mc / 1000})
+            return
+        match = TRANSITION.search(text)
+        if match:
+            self.states.append((t, int(match.group(2))))
+            self.states = [s for s in self.states if t - s[0] < 600] or self.states[-1:]
+
+    def _mismatch(self, t, kind, message):
+        self.mismatches[kind] = self.mismatches.get(kind, 0) + 1
+        if self.mismatches[kind] == 1:
+            self.event(t, "warn", f"telemetry disagrees with the log: {message}")
+
+    def on_telemetry(self, t, tel):
+        self.decoded += 1
+        if tel["uhf_health"] != self.c["TEL_DEVICE_STATUS_OK"]:
+            self._mismatch(t, "uhf_health", f"uhf_health is {tel['uhf_health']} in a beacon the UHF radio sent")
+        for pack, (logged_t, values) in self.packs.items():
+            if t - logged_t > self.LOG_FRESH_S:
+                continue
+            for name, tolerance in self.EPS_TOLERANCE.items():
+                got = tel[f"eps.{name}"][pack]
+                if abs(got - values[name]) > tolerance:
+                    self._mismatch(t, f"eps.{name}", f"eps.{name}[{pack}] is {got:.3f}, the log says {values[name]:.3f}")
+        if self.states:
+            # The beacon's telemetry was collected when its burst started, up to beacon_age_s before it was heard
+            recent = {s for st, s in self.states if st >= t - self.beacon_age_s - 5}
+            current = [s for st, s in self.states if st < t - self.beacon_age_s - 5][-1:]
+            allowed = recent | set(current)
+            if tel["state_machine.state_history"][0] not in allowed:
+                self._mismatch(t, "state", f"state {tel['state_machine.state_history'][0]}, the log says "
+                                           f"{sorted(allowed)}")
+        if self.last is not None:
+            last_t, last_ts, last_boot = self.last
+            rebooted = self.boot_t is not None and self.boot_t > last_t
+            if last_boot and tel["boot_timestamp"] and abs(tel["boot_timestamp"] - last_boot) > 5 and not rebooted:
+                self._mismatch(t, "boot_timestamp", f"boot_timestamp moved {tel['boot_timestamp'] - last_boot:+d} s "
+                                                    f"without a reset")
+            if last_ts and tel["timestamp"] and tel["timestamp"] < last_ts and not rebooted:
+                self._mismatch(t, "timestamp", f"timestamp went back {last_ts - tel['timestamp']} s")
+        self.last = (t, tel["timestamp"], tel["boot_timestamp"])
+
+    def metrics(self):
+        return {"telemetry_beacons": self.decoded, "telemetry_mismatches": sum(self.mismatches.values())}
+
+    def state(self):
+        return {"decoded": self.decoded, "mismatches": self.mismatches}
 
 
 def check_outputs(t, capture, emit):
@@ -448,7 +672,7 @@ OUTPUT_SIGNALS = [f"mtq_{axis}_in{n}" for axis in "xyz" for n in (1, 2)] + ["bur
 
 def build(config, emit, radio_constants=None):
     """The monitors a soak config asks for, in the order they see each line. radio_constants (ccsds.constants()) adds
-    the radio monitor."""
+    the radio, uplink and telemetry monitors."""
     m = config["monitors"]
     built = [
         LogSilence(emit, m["max_log_silence_s"]),
@@ -461,5 +685,11 @@ def build(config, emit, radio_constants=None):
     if radio_constants is not None:
         c = radio_constants
         beacon_period_s = (c["UHF_BEACON_PERIOD_MS"] + c["UHF_BEACON_BURST_MS"]) / 1000
-        built.append(RadioLink(emit, beacon_period_s, c["UHF_LINK_TIMEOUT_MS"] / 1000))
+        beacon_age_s = c["UHF_BEACON_BURST_MS"] / 1000
+        link_timeout_s = c["UHF_LINK_TIMEOUT_MS"] / 1000
+        built.append(RadioLink(emit, beacon_period_s, link_timeout_s))
+        # A command is checked in the beacons after the pass: the link has to time out first, then a burst starts
+        settle_s = config.get("radio", {}).get("uplink_settle_s", link_timeout_s + 3 * beacon_period_s)
+        built.append(Uplinks(emit, c, settle_s, beacon_age_s))
+        built.append(Telemetry(emit, c, beacon_age_s))
     return built

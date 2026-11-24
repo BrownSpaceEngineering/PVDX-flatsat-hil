@@ -7,8 +7,17 @@ with BrownSpaceEngineering/gr-ccsds (USLP/GNURadioFiles/Files/Two_GFSK.py): 2-FS
 
     preamble (01010101 x 8) | SFD (16 bits) | PHR (16 bits) | PSDU (length octets, the last 2 the FCS)
 
-Uncoded frames only. The satellite's current config sends coded frames (rate-1/2 RSC FEC, SFD1 0x72F6), which this
-modem can't decode until the RSC encoder from IEEE 802.15.4g is added (frames with SFD1 are counted, not decoded).
+Frames are uncoded (SFD0) or FEC-coded (SFD1), as the satellite's FSKC4.CSFD0/CSFD1 say; the satellite sends coded
+frames and receives either (dual SFD sense). Coding follows IEEE 802.15.4g-2012 18.1.2.4-18.1.2.5, as implemented in
+dudmuck/gr-ieee802154g: the PHR, PSDU and FCS bits, then 3 tail bits and pad bits, go through a rate-1/2, constraint
+length 4 convolutional code (generators 1 + D^2 + D^3 and 1 + D + D^2 + D^3), optionally followed by the 32-bit block
+interleaver; PN9 whitening (PHR bit DW) covers the PSDU only and comes before coding. The receiver decodes with a soft
+Viterbi decoder.
+
+The satellite uses the recursive systematic code (RSC, FSKC3.FECS = 1), which that source doesn't implement: which
+generator is the feedback and which output goes first is a guess (RSC below, confirmed=False) until fit_rsc.py has
+matched it against beacons captured from the satellite. Until then a coded frame is read from its systematic bits
+(every other coded bit is the data itself), checked by its FCS, and reported as fec="systematic".
 
 Details the datasheet leaves to IEEE 802.15.4g, taken from the 802.15.4 conventions and to be confirmed against the
 real chip (each is a constant below, so a correction is one line):
@@ -20,6 +29,8 @@ real chip (each is a constant below, so a correction is one line):
 The ground also checks the USLP frame's own CRC, so a wrong guess here shows up as frames with a bad FCS but a good
 USLP CRC rather than as silence.
 """
+
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -39,6 +50,186 @@ MAX_PSDU = 2047
 
 PSDU_LSB_FIRST = True
 SFD_LSB_FIRST = True
+
+
+# ---------- FEC (IEEE 802.15.4g-2012 18.1.2.4-18.1.2.5) ----------
+
+SYS = -1  # An output that is the input bit itself
+
+
+def _parity(x):
+    return bin(x).count("1") & 1
+
+
+@dataclass(frozen=True)
+class Code:
+    """A rate-1/2, constraint length 4 convolutional code. Polynomials are in D, bit k the coefficient of D^k. The
+    shift register holds a_k: the input bit for a feedforward code (feedback 0), the input plus the feedback parity of
+    the register for a recursive one. Each input bit gives the two outputs in transmit order: SYS (the input bit) or
+    the parity of a polynomial over a_k, a_k-1, a_k-2, a_k-3."""
+
+    name: str
+    feedback: int
+    outputs: tuple
+    confirmed: bool = True  # Matched against the real chip
+
+    def step(self, state, u):
+        """(next state, (out0, out1)). state holds a_k-1 (bit 0), a_k-2, a_k-3."""
+        a = u ^ _parity((self.feedback >> 1) & state) if self.feedback else u
+        w = a | (state << 1)
+        out = tuple(u if g == SYS else _parity(g & w) for g in self.outputs)
+        return ((state << 1) | a) & 7, out
+
+    def terminating_input(self, state):
+        """The input bit that shifts a 0 into the register, so 3 of them in a row flush it to state 0."""
+        return _parity((self.feedback >> 1) & state) if self.feedback else 0
+
+    def encode(self, bits, state=0):
+        out = np.empty(2 * len(bits), dtype=np.uint8)
+        for i, u in enumerate(bits):
+            state, (out[2 * i], out[2 * i + 1]) = self.step(state, int(u))
+        return out
+
+    def trellis(self):
+        """For each next state, its two (previous state, input) and the outputs as +-1, for the Viterbi decoder."""
+        cached = _TRELLIS.get(self)
+        if cached is None:
+            prev = [[] for _ in range(8)]
+            for s in range(8):
+                for u in (0, 1):
+                    ns, out = self.step(s, u)
+                    prev[ns].append((s, u, [2 * o - 1 for o in out]))
+            if any(len(p) != 2 for p in prev):
+                raise ValueError(f"{self.name} isn't a valid rate-1/2 trellis")
+            ps = np.array([[p[0] for p in row] for row in prev])
+            pu = np.array([[p[1] for p in row] for row in prev], dtype=np.uint8)
+            signs = np.array([[p[2] for p in row] for row in prev], dtype=np.float64)
+            cached = _TRELLIS[self] = (ps, pu, signs)
+        return cached
+
+
+_TRELLIS = {}
+
+# Non-recursive non-systematic code (FSKC3.FECS = 0): Figure 124 of 802.15.4g-2012, as gr-ieee802154g encodes it
+NRNSC = Code("NRNSC", 0, (0b1101, 0b1111))
+# Recursive systematic code (FSKC3.FECS = 1), which the satellite uses: the same generators with the first as the
+# feedback, systematic bit first. NOT CONFIRMED: soak/tools/fit_rsc.py finds the real one from captured beacons
+RSC = Code("RSC", 0b1101, (SYS, 0b1111), confirmed=False)
+CODES = {"NRNSC": NRNSC, "RSC": RSC}
+
+TAIL_BITS = 3
+PAD_ODD = (0, 1, 0, 1, 1)  # When the PHR and PSDU are an odd number of octets
+PAD_EVEN = (0, 1, 0, 1, 1, 0, 0, 0, 0, 1, 0, 1, 1)
+# The interleaver permutes the 16 coded bit pairs of each 32 coded bits: pair k comes from pair INTERLEAVE[k]. It is its
+# own inverse. From gr-ieee802154g; the satellite doesn't interleave (FSKC2.FECIE = 0), so this is unconfirmed
+INTERLEAVE = (15, 11, 7, 3, 14, 10, 6, 2, 13, 9, 5, 1, 12, 8, 4, 0)
+
+
+def pad_bits(psdu_octets):
+    return PAD_ODD if (psdu_octets + 2) % 2 else PAD_EVEN
+
+
+def coded_info_bits(psdu_octets):
+    """Input bits to the encoder for a PSDU of this many octets (including the FCS): PHR, PSDU, tail and pad."""
+    return 16 + 8 * psdu_octets + TAIL_BITS + len(pad_bits(psdu_octets))
+
+
+def interleave(bits):
+    """Applies (or undoes: it's an involution) the interleaver to whole 32-bit blocks; a partial last block is left."""
+    bits = np.asarray(bits)
+    out = bits.copy()
+    whole = len(bits) // 32 * 32
+    blocks = bits[:whole].reshape(-1, 16, 2)
+    out[:whole] = blocks[:, list(INTERLEAVE), :].reshape(-1)
+    return out
+
+
+def pn9(n):
+    """The first n bits of the PN9 whitening sequence (x^9 + x^5 + 1, seeded with all ones)."""
+    lfsr = 0x1FF
+    out = np.empty(n, dtype=np.uint8)
+    for i in range(n):
+        out[i] = lfsr & 1
+        feedback = (lfsr & 1) ^ ((lfsr >> 5) & 1)
+        lfsr = (lfsr >> 1) | (feedback << 8)
+    return out
+
+
+def encode_frame(phr, psdu_bits, code):
+    """The coded bits of a frame: PHR and PSDU bits, then the tail that returns the encoder to state 0, then the pad."""
+    state = 0
+    out = []
+    for u in list(phr) + list(psdu_bits):
+        state, pair = code.step(state, int(u))
+        out += pair
+    for _ in range(TAIL_BITS):
+        u = code.terminating_input(state)
+        state, pair = code.step(state, u)
+        out += pair
+    for u in pad_bits(len(psdu_bits) // 8):
+        state, pair = code.step(state, u)
+        out += pair
+    return np.array(out, dtype=np.uint8)
+
+
+def viterbi(code, soft, start_state=0):
+    """Most likely input bits for soft coded bits (positive means 1), starting from start_state and ending anywhere."""
+    ps, pu, signs = code.trellis()
+    n = len(soft) // 2
+    pairs = np.asarray(soft[:2 * n], dtype=np.float64).reshape(n, 2)
+    metric = np.full(8, -1e30)
+    metric[start_state] = 0.0
+    decisions = np.empty((n, 8), dtype=np.uint8)
+    rows = np.arange(8)
+    branch = signs @ pairs.T  # (8, 2, n): each next state's two branch metrics, for every step
+    for k in range(n):
+        cand = metric[ps] + branch[:, :, k]
+        choice = (cand[:, 1] > cand[:, 0]).astype(np.uint8)
+        decisions[k] = choice
+        metric = cand[rows, choice]
+        metric -= metric.max()
+    state = int(np.argmax(metric))
+    bits = np.empty(n, dtype=np.uint8)
+    for k in range(n - 1, -1, -1):
+        c = decisions[k, state]
+        bits[k] = pu[state, c]
+        state = int(ps[state, c])
+    return bits
+
+
+# What the satellite's baseband settings (ccsds.phy_config()) must be for this modem to talk to it. Each is the value
+# as at86_pvdx.c writes it ("0" for one it leaves out)
+EXPECTED_PHY = {
+    "pt": "AT86RF215_BB_MRFSK",
+    "fcst": "AT86RF215_FCS_16",
+    "fsk.mord": "AT86RF215_2FSK",
+    "fsk.midx": "AT86RF215_MIDX_1",  # Modulation index 0.5
+    "fsk.bt": "AT86RF215_FSK_BT_05",
+    "fsk.srate": "AT86RF215_FSK_SRATE_50",
+    "fsk.preamble_length": str(PREAMBLE_OCTETS),
+    "fsk.sfd32": "0",  # Dual SFD sense: the satellite receives both uncoded and coded frames
+    "fsk.csfd0": "AT86RF215_SFD_UNCODED_IEEE",
+    "fsk.csfd1": "AT86RF215_SFD_CODED_IEEE",
+    "fsk.dw": "0",  # The satellite doesn't whiten (pn9() is unconfirmed)
+}
+
+
+def check_phy(settings):
+    """The (code, interleaved, tx_coded) the satellite's settings imply, after checking that they're what this modem
+    speaks. Raises ValueError naming every difference."""
+    get = lambda key: settings.get(key, "0").strip()
+    problems = [f"{key} is {get(key)}, expected {want}" for key, want in EXPECTED_PHY.items() if get(key) != want]
+    for key, want in (("fsk.sfd0", SFD_UNCODED), ("fsk.sfd1", SFD_CODED)):
+        if int(get(key), 0) != want:
+            problems.append(f"{key} is {get(key)}, expected 0x{want:04X}")
+    fecs = get("fsk.fecs")
+    code = {"AT86RF215_FSK_FEC_RSC": RSC, "AT86RF215_FSK_FEC_NRNSC": NRNSC, "0": NRNSC}.get(fecs)
+    if code is None:
+        problems.append(f"fsk.fecs is {fecs}, which this modem doesn't know")
+    if problems:
+        raise ValueError(f"the satellite's PHY ({settings.get('config')}) isn't what mrfsk.py speaks: " + "; ".join(problems))
+    # FSKPHRTX.SFD picks the SFD the satellite sends with, and CSFD1 makes SFD1 coded
+    return code, get("fsk.fecie") == "1", get("fsk.sfd") == "1"
 
 
 def crc16(data):
@@ -83,12 +274,22 @@ def parse_phr(bits):
     return length, bool(bits[3]), bool(bits[4])
 
 
-def frame_bits(payload):
-    """Every bit of the PPDU for a payload (the PSDU without its FCS, which is appended here as the chip does)."""
+def frame_bits(payload, code=None, interleaved=False, whitened=False):
+    """Every bit of the PPDU for a payload (the PSDU without its FCS, which is appended here as the chip does):
+    uncoded on SFD0, or coded with `code` on SFD1."""
     fcs = crc16(payload)
     psdu = bytes(payload) + bytes([fcs & 0xFF, fcs >> 8])
     preamble = np.tile(np.array([0, 1, 0, 1, 0, 1, 0, 1], dtype=np.uint8), PREAMBLE_OCTETS)
-    return np.concatenate([preamble, sfd_bits(), phr_bits(len(psdu)), octet_bits(psdu)])
+    phr = phr_bits(len(psdu), whitened=whitened)
+    data = octet_bits(psdu)
+    if whitened:
+        data = data ^ pn9(len(data))
+    if code is None:
+        return np.concatenate([preamble, sfd_bits(SFD_UNCODED), phr, data])
+    coded = encode_frame(phr, data, code)
+    if interleaved:
+        coded = interleave(coded)
+    return np.concatenate([preamble, sfd_bits(SFD_CODED), coded])
 
 
 def _lowpass(cutoff_hz, rate, taps):
@@ -129,24 +330,33 @@ def from_hackrf(raw):
 class Received:
     """One frame the demodulator found."""
 
-    def __init__(self, psdu, fcs_ok, coded, sample, power_db, freq_offset_hz):
+    def __init__(self, psdu, fcs_ok, coded, sample, power_db, freq_offset_hz, fec="", corrected_bits=None,
+                 coded_bits=None):
         self.psdu = psdu  # Including the 2 FCS octets
         self.payload = psdu[:-2]
         self.fcs_ok = fcs_ok
-        self.coded = coded  # SFD1: FEC-coded, not decoded (payload is empty)
+        self.coded = coded  # Sent with SFD1 (FEC-coded)
         self.sample = sample  # Position of the SFD's first sample in the input stream
         self.power_db = power_db
         self.freq_offset_hz = freq_offset_hz
+        # How a coded frame was decoded: "viterbi", "systematic:<0|1>" (the data read from the systematic bits at that
+        # position of each pair, the code being unconfirmed) or "failed"; "" for an uncoded frame
+        self.fec = fec
+        self.corrected_bits = corrected_bits  # Coded bits the Viterbi decoder corrected (None if not decoded by it)
+        self.coded_bits = coded_bits  # Hard decisions on every coded bit (deinterleaved), for fit_rsc.py
 
     def __repr__(self):
-        return f"Received({len(self.payload)} bytes, fcs_ok={self.fcs_ok}, coded={self.coded}, {self.power_db:.1f} dB)"
+        return (f"Received({len(self.payload)} bytes, fcs_ok={self.fcs_ok}, coded={self.coded}, fec={self.fec!r}, "
+                f"{self.power_db:.1f} dB)")
 
 
 class Demodulator:
     """Finds frames in a stream of complex samples at SAMPLE_RATE. feed() takes any amount and returns the frames that
     ended in it; samples are kept across calls, so a frame may straddle them."""
 
-    def __init__(self):
+    def __init__(self, code=RSC, interleaved=False):
+        self.code = code  # The code coded frames use
+        self.interleaved = interleaved
         self.decim = SPS // RX_SPS
         self.prev = np.complex64(1)
         self.lpf = _lowpass(CHANNEL_CUTOFF_HZ, SAMPLE_RATE, 129)
@@ -250,6 +460,59 @@ class Demodulator:
             return None
         return (self.soft[idx] - dc > 0).astype(np.uint8)
 
+    def _soft(self, start, count, dc, phase):
+        """count soft symbols from soft[start:] (positive means 1), or None if they haven't all arrived."""
+        idx = start + phase + RX_SPS * np.arange(count)
+        if idx[-1] >= len(self.soft):
+            return None
+        return (self.soft[idx] - dc).astype(np.float64)
+
+    def _decoders(self):
+        """(name, function from soft coded bits to input bits) to try on a coded frame, in order."""
+        decoders = [("viterbi", lambda soft: viterbi(self.code, soft))]
+        if not self.code.confirmed and SYS in self.code.outputs:
+            # The data is every other coded bit, whatever the parity is; which of each pair isn't known either
+            decoders += [(f"systematic:{p}", lambda soft, p=p: (soft[p::2] > 0).astype(np.uint8)) for p in (0, 1)]
+        return decoders
+
+    def _decode_coded(self, start, dc, phase):
+        """(frame or None, end) for a coded frame whose PHR starts at soft[start], or None if more input is needed."""
+        head = self._soft(start, 96, dc, phase)  # 48 input bits: the PHR and some lookahead for the decoder
+        if head is None:
+            return None
+        if self.interleaved:
+            head = interleave(head)
+        best = None
+        waiting = False
+        for name, decode in self._decoders():
+            length, _, whitened = parse_phr(decode(head)[:16])
+            if not 3 <= length <= MAX_PSDU:
+                continue
+            n_coded = 2 * coded_info_bits(length)
+            soft = self._soft(start, n_coded, dc, phase)
+            if soft is None:
+                waiting = True
+                continue
+            if self.interleaved:
+                soft = interleave(soft)
+            info = decode(soft)
+            data = info[16:16 + 8 * length]
+            if whitened:
+                data = data ^ pn9(len(data))
+            psdu = bits_octets(data)
+            fcs_ok = crc16(psdu[:-2]) == psdu[-2] | (psdu[-1] << 8)
+            hard = (soft > 0).astype(np.uint8)
+            corrected = None
+            if name == "viterbi":
+                corrected = int(np.count_nonzero(self.code.encode(info) != hard))
+            result = (psdu, fcs_ok, name, corrected, hard, start + n_coded * RX_SPS)
+            if fcs_ok:
+                return result
+            best = best or result
+        if waiting:
+            return None
+        return best or "false"
+
     def _decode(self, start, coded, power):
         """(frame or None, end index) for a frame whose PHR starts at soft[start], or None if more input is needed."""
         n_ref = len(self.refs[False])
@@ -263,17 +526,27 @@ class Demodulator:
         sfd_at = (self.soft_start + start - 16 * RX_SPS) * self.decim  # Approximate: ignores the filter delays
         level = float(10 * np.log10(power[start - n_ref:start].mean() + 1e-12))
         if coded:
-            # The PHR is coded too, so not even the length is readable: skip past the sync and carry on searching
-            return Received(b"", False, True, sfd_at, level, offset_hz), start
+            result = self._decode_coded(start, dc, phase)
+            if result is None:
+                return None
+            if result == "false":
+                return (None, start)  # No decoder read a plausible length: a false sync
+            psdu, fcs_ok, fec, corrected, hard, end = result
+            frame = Received(psdu, fcs_ok, True, sfd_at, level, offset_hz, fec=fec if fcs_ok else "failed",
+                             corrected_bits=corrected, coded_bits=hard)
+            # As for an uncoded frame, a bad one may have been a false sync
+            return frame, end if fcs_ok else start
         phr = self._bits(start, 16, dc, phase)
         if phr is None:
             return None
-        length, _, _ = parse_phr(phr)
+        length, _, whitened = parse_phr(phr)
         if not 3 <= length <= MAX_PSDU:
             return (None, start)  # A false sync
         psdu_bits = self._bits(start + 16 * RX_SPS, 8 * length, dc, phase)
         if psdu_bits is None:
             return None
+        if whitened:
+            psdu_bits = psdu_bits ^ pn9(len(psdu_bits))
         psdu = bits_octets(psdu_bits)
         fcs_ok = crc16(psdu[:-2]) == psdu[-2] | (psdu[-1] << 8)
         # A bad frame may have been a false sync: carry on searching just after its sync, so a real frame inside it

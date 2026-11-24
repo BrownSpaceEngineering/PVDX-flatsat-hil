@@ -14,14 +14,23 @@ pass_s = 600
 offset_s = 300
 
 [radio]
-# The HackRF ground station (hil/lib/ground.py). Needs PVDX_ROOT pointing at PVDXos sources with the UHF radio task
-# (the radio-task branch), and a cabled RF link through at least 60 dB of attenuation.
+# The HackRF ground station (hil/lib/ground.py). Needs PVDX_ROOT pointing at the PVDXos checkout the flatsat's build came
+# from (the ground decodes and uplinks with its sources), and a cabled RF link through at least 60 dB of attenuation.
 enabled = false
 lna_db = 24                                  # hackrf_transfer -l (RX LNA, 0-40 in 8 dB steps)
 vga_db = 20                                  # hackrf_transfer -g (RX VGA, 0-62 in 2 dB steps)
 tx_vga_db = 0                                # hackrf_transfer -x (TX VGA, 0-47)
-turns_per_pass = 2                           # Handovers each way in a pass
+turns_per_pass = 2                           # Handovers each way in a pass (more while the uplink isn't finished)
 serial = ""                                  # HackRF serial number, if more than one is plugged in
+tx_coded = true                              # Code the ground's frames like the satellite's, once mrfsk.py's code is confirmed
+# uplink_settle_s = 300                      # How long after a pass a command may take to show in telemetry (default:
+                                             # the link timeout plus three beacon periods)
+
+[radio.commands]
+# What each pass uplinks (soak/uplinks.py): SET_UNIX_TIME every pass, plus one step of the rotation
+set_unix_time = true
+adcs_opmode = true                           # Detumble-only, then back to pointing
+toggle_device = "CAMERA_ID"                  # A device_id_t to disable, then enable again ("" for none)
 
 [environment]
 update_s = 10                                # How often the tester's inputs follow the orbit
