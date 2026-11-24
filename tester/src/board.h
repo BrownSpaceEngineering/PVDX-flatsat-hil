@@ -27,6 +27,21 @@
 #define STXG2_SDA PINMUX_PC16C_SERCOM6_PAD0 // [D25/SDA1]
 #define STXG2_SCL PINMUX_PC17C_SERCOM6_PAD1 // [D24/SCL1]
 
+// Fuel gauges (the flatsat's EPS, behind its TCA9546A mux): a MAX17205 target answering 0x36 and 0x0B on each mux
+// channel's bus (SDn/SCn on the flatsat's EPS header)
+#define FG0_SERCOM SERCOM1
+#define FG0_SDA PINMUX_PA16C_SERCOM1_PAD0 // [D37]
+#define FG0_SCL PINMUX_PA17C_SERCOM1_PAD1 // [D36]
+#define FG1_SERCOM SERCOM5
+#define FG1_SDA PINMUX_PA23D_SERCOM5_PAD0 // [D30]
+#define FG1_SCL PINMUX_PA22D_SERCOM5_PAD1 // [D31]
+#define FG2_SERCOM SERCOM4
+#define FG2_SDA PINMUX_PB12C_SERCOM4_PAD0 // [D18]
+#define FG2_SCL PINMUX_PB13C_SERCOM4_PAD1 // [D19]
+#define FG3_SERCOM SERCOM0
+#define FG3_SDA PINMUX_PB24C_SERCOM0_PAD0 // [D1]
+#define FG3_SCL PINMUX_PB25C_SERCOM0_PAD1 // [D0]
+
 // S-band radio data SPI (flatsat SPI_SBAND) is ASF SBAND_SPI on SERCOM7: SCK PD09 [D52], SS PD10 [D53], data in
 // PD11 [D50] (PAD3). Data out, PD08 [D51], isn't wired.
 

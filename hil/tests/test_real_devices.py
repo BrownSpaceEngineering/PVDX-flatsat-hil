@@ -1,13 +1,15 @@
-"""The flatsat's real hardware (magnetometer, gyro, MRAM, UHF radio, fuel gauges, display, camera) is present and reads
-plausibly with the board sitting still on the bench."""
+"""The flatsat's real hardware (magnetometer, gyro, MRAM, UHF radio, camera, and the EPS's fuel gauges unless the
+tester's emulated ones are wired) is present and reads plausibly with the board sitting still on the bench. The display
+has no device check: it is write-only over SPI, so nothing can show it is there."""
 
 import math
 
 import pytest
 
-REAL = ["MAGNETOMETER_ID", "GYROSCOPE_ID", "MRAM_ID", "UHF_ID", "EPS_ID", "DISPLAY_ID", "CAMERA_ID"]
-SENSOR_LOG = (r"adcs: mag \[([-\d.e+]+),([-\d.e+]+),([-\d.e+]+)\] uT, "
-              r"gyro \[([-\d.e+]+),([-\d.e+]+),([-\d.e+]+)\] rad/s")
+REAL = ["MAGNETOMETER_ID", "GYROSCOPE_ID", "MRAM_ID", "UHF_ID", "CAMERA_ID"]
+# Logged every ADCS_SENSOR_LOG_STEPS steps (about 5 s), in nT and mrad/s: the log has no %f
+SENSOR_LOG = r"adcs: mag \[(-?\d+),(-?\d+),(-?\d+)\] nT, gyro \[(-?\d+),(-?\d+),(-?\d+)\] mrad/s"
+SENSOR_LOG_S = 15.0  # Long enough for a few of them
 EARTH_FIELD_UT = (20.0, 70.0)  # Anywhere on the surface, plus some room for the lab
 STILL_RAD_S = math.radians(1.0)
 
@@ -19,7 +21,7 @@ def boot_log(tester_session, flatsat):
     tester_session.reset()
     set_environment(tester_session)
     mark = flatsat.boot()
-    flatsat.collect(r"adcs: mag", 5.0)
+    flatsat.collect(r"adcs: mag", SENSOR_LOG_S)
     return mark
 
 
@@ -31,8 +33,8 @@ def test_real_device_passes_its_check(flatsat, boot_log, device):
 def sensor_readings(flatsat, since):
     out = []
     for m in flatsat.find_all(SENSOR_LOG, since):
-        values = [float(x) for x in m.groups()]
-        out.append((values[:3], values[3:]))
+        values = [int(x) for x in m.groups()]
+        out.append(([v / 1000 for v in values[:3]], [v / 1000 for v in values[3:]]))  # uT, rad/s
     return out
 
 
@@ -51,7 +53,17 @@ def test_gyro_reads_still(flatsat, boot_log):
     assert all(r < STILL_RAD_S for r in rates), f"rates {rates} rad/s with the board still"
 
 
-def test_fuel_gauges_report_a_battery_level(flatsat, boot_log):
+def test_real_fuel_gauges_pass_their_check(tester_session, flatsat, boot_log):
+    from conftest import skip_unless_fuel_gauges
+
+    skip_unless_fuel_gauges(tester_session, emulated=False)
+    assert flatsat.device_checks(boot_log).get("EPS_ID"), "EPS_ID failed its startup check"
+
+
+def test_fuel_gauges_report_a_battery_level(tester_session, flatsat, boot_log):
+    from conftest import skip_unless_fuel_gauges
+
+    skip_unless_fuel_gauges(tester_session, emulated=False)
     match = flatsat.expect(r"fuel_gauge: battery level (-?\d+)/1000", timeout=30, since=boot_log)
     level = int(match.group(1))
     assert 0 <= level <= 1000

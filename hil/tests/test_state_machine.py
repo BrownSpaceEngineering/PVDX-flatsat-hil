@@ -1,16 +1,19 @@
 """State machine timing in a normal DEVBUILD (src/states.c): IDLE waits FAKE_IDLE_PERIOD_MS (25 s), FAKE_HEARTBEAT lasts
-FAKE_HEARTBEAT_PERIOD_MS (5 s) and mocks sunlight, so IDLE then goes to PEROVSKITE_CAPTURE."""
+FAKE_HEARTBEAT_PERIOD_MS (5 s) and mocks sunlight, so IDLE then goes to PEROVSKITE_CAPTURE. Runs in eclipse: ADCS reports
+real sunlight from the photodiodes, which would start a perovskite capture before the heartbeat."""
 
 import re
 
 import firmware
+from conftest import DARK, set_environment
 
 IDLE_S = 25.0
 HEARTBEAT_S = 5.0
 TOLERANCE_S = 1.5
 
 
-def test_idle_heartbeat_cycle(nominal, flatsat):
+def test_idle_heartbeat_cycle(tester, flatsat):
+    set_environment(tester, photodiodes=DARK)
     states = firmware.state_ids()
     idle, heartbeat, perovskite = states["STATE_IDLE"], states["STATE_FAKE_HEARTBEAT"], states["STATE_PEROVSKITE_CAPTURE"]
     mark = flatsat.boot()

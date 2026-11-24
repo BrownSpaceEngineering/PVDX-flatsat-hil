@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "ina226_model.h"
+#include "max17205_model.h"
 #include "mcp23017_model.h"
 #include "pixel_model.h"
 #include "tester_platform.h"
@@ -199,9 +200,29 @@ static void cmd_pmb(char **tok, size_t count) {
     send(n);
 }
 
+static void cmd_fg(char **tok, size_t count) {
+    if (count == 2 && strcmp(tok[1], "get") == 0) {
+        ok_with(max17205_json);
+        return;
+    }
+    uint32_t pack = 0, reg = 0, value = 0;
+    const bool all = count == 5 && strcmp(tok[2], "all") == 0;
+    if (count != 5 || strcmp(tok[1], "set") != 0 || (!all && (!parse_uint(tok[2], &pack) || pack >= MAX17205_PACKS)) ||
+        !parse_uint(tok[3], &reg) || reg >= MAX17205_REG_COUNT || !parse_uint(tok[4], &value) || value > 0xFFFFu) {
+        error("usage: fg get | fg set <0-3|all> <register> <value>");
+        return;
+    }
+    for (uint8_t p = 0; p < MAX17205_PACKS; p++) {
+        if (all || p == pack) {
+            max17205_set_reg(p, (uint16_t)reg, (uint16_t)value);
+        }
+    }
+    ok();
+}
+
 static void cmd_fault(char **tok, size_t count) {
     if (count != 3) {
-        error("usage: fault <stxg2|ina226|mcp23017|pmb_bus> <mode>");
+        error("usage: fault <stxg2|ina226|mcp23017|pmb_bus|fg0-fg3> <mode>");
         return;
     }
     const char *const device = tok[1];
@@ -233,6 +254,15 @@ static void cmd_fault(char **tok, size_t count) {
                 return;
             }
         }
+    } else if (strncmp(device, "fg", 2) == 0 && device[2] >= '0' && device[2] < (char)('0' + MAX17205_PACKS) && device[3] == '\0') {
+        static const char *const MODES[] = {"none", "nack", "hold_bus"};
+        for (int i = 0; i < 3; i++) {
+            if (strcmp(mode, MODES[i]) == 0) {
+                max17205_set_fault((uint8_t)(device[2] - '0'), (max17205_fault_t)i);
+                ok();
+                return;
+            }
+        }
     } else if (strcmp(device, "pmb_bus") == 0 && (strcmp(mode, "none") == 0 || strcmp(mode, "hold_bus") == 0)) {
         platform_hold_pmb_bus(strcmp(mode, "hold_bus") == 0);
         ok();
@@ -249,8 +279,12 @@ static void reset_all(void) {
     ina226_set_fault(INA226_FAULT_NONE);
     mcp23017_set_fault(MCP23017_FAULT_NONE);
     platform_hold_pmb_bus(false);
+    for (uint8_t p = 0; p < MAX17205_PACKS; p++) {
+        max17205_set_fault(p, MAX17205_FAULT_NONE);
+    }
     stxg2_reset();
     pmb_reset();
+    max17205_reset();
     for (uint8_t out = 0; out < analog_out_count(); out++) {
         analog_out_set(out, 0.0f);
     }
@@ -296,6 +330,8 @@ static void execute(char *text) {
         cmd_pixel(tok, count);
     } else if (strcmp(name, "pmb") == 0) {
         cmd_pmb(tok, count);
+    } else if (strcmp(name, "fg") == 0) {
+        cmd_fg(tok, count);
     } else if (strcmp(name, "stxg2") == 0 && count == 2 && strcmp(tok[1], "get") == 0) {
         ok_with(stxg2_json);
     } else if (strcmp(name, "fault") == 0) {

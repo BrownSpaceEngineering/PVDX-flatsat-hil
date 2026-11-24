@@ -1,8 +1,8 @@
 /**
  * sercom.c
  *
- * Clocks and interrupt dispatch for the SERCOMs the tester drives itself: the I2C targets on SERCOM3 and SERCOM6
- * (i2c_slave.c). Every other SERCOM is an ASF driver, which defines its own interrupt handlers. Each SERCOM has four
+ * Clocks and interrupt dispatch for the SERCOMs the tester drives itself: the I2C targets on SERCOM3, SERCOM6 and,
+ * for the fuel gauges, SERCOM0, 1, 4 and 5 (i2c_slave.c). Every other SERCOM is an ASF driver, which defines its own interrupt handlers. Each SERCOM has four
  * interrupt lines on the SAMD51; all four go to the one handler registered for that SERCOM.
  */
 
@@ -95,5 +95,9 @@ static void dispatch(uint8_t index) {
         dispatch(n);                                                                                                             \
     }
 
+SERCOM_HANDLERS(0) // Fuel gauge 3 I2C target
+SERCOM_HANDLERS(1) // Fuel gauge 0 I2C target
 SERCOM_HANDLERS(3) // Perovskite board I2C target
+SERCOM_HANDLERS(4) // Fuel gauge 2 I2C target
+SERCOM_HANDLERS(5) // Fuel gauge 1 I2C target
 SERCOM_HANDLERS(6) // S-band I2C target
