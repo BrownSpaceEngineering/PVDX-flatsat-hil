@@ -218,17 +218,31 @@ when it ends as asked, whatever it found; read `summary.md`.
 telemetry beacons all the time and, in each `[passes]` window, opens the UHF link (PUSP: SYN, SYN_ACK, SRT), uplinks a
 command file over CFDP and trades turns until the transfer is done. Use a cabled link with at least 60 dB of attenuation.
 
-What each pass uplinks (`[radio.commands]`, `soak/uplinks.py`): `SET_UNIX_TIME` every pass, plus the next step of a
-rotation: ADCS detumble-only, back to pointing, a device (`toggle_device`, the camera by default) disabled, then enabled.
-Every frame the ground sends also carries the time, which the satellite sets its clock from.
+What each pass uplinks (`[radio.commands]`, `soak/uplinks.py`): `SET_UNIX_TIME` every pass, plus the next step of
+`rotation`, which covers every uplink command by default; list only the steps you want:
+
+| Step | Command | Checked by |
+|---|---|---|
+| `adcs_detumble`, `adcs_point` | `SET_ADCS_OP_MODE` | `adcs.opmode` in telemetry |
+| `device_off`, `device_on` | `ENABLE_DISABLE_DEVICE` (`toggle_device`) | the device's health field |
+| `transmit_off`, `transmit_on` | `TRANSMIT_ON_OFF` | no beacon until the next pass; beacons again |
+| `update_display` | `UPDATE_DISPLAY` (an 8 KB file) | the satellite logs the image as saved |
+| `take_iv_curve`, `send_iv_curve` | `TAKE_IV_CURVE`, `SEND_IV_CURVE` | the new sampling resolution, the file queued, in the log |
+| `take_photo`, `send_photo` | `TAKE_PHOTO`, `SEND_PHOTO` | the photo override, the file queued, in the log |
+| `set_kepler`, `adcs_params` | `SET_KEPLER_COEFF`, `ADCS_UPDATE_PARAMS` | received; `adcs.tle_epoch_unix_time` for the TLE |
+| `set_power_mode` | `SET_PWR_MODE` | received |
+| `reboot` | `REBOOT` | a commanded reboot after the pass |
+
+Every frame the ground sends carries the time, which the satellite sets its clock from, and every SYN carries
+`PUSP_NOTIF_ENABLE_TX`, so a satellite told to stop transmitting answers the next pass.
 
 Monitors:
 - `radio`: fails on a beacon gap of more than 2.5 beacon periods outside passes, or a pass the satellite doesn't
   answer; missed bursts (VC frame count steps) and unreadable frames are warn events. Its metrics include how coded
   frames were decoded and the coded bit error rate the Viterbi decoder corrected (the link's margin).
-- `uplink`: fails an uplink the satellite doesn't finish, and any command that doesn't show in a beacon within
-  `uplink_settle_s` of its pass (the file's timestamp in `command_timestamps`, UTC-valid and the ground's time, the
-  ADCS opmode, the device's health field). A command the satellite logs as not implemented is a warn event instead.
+- `uplink`: fails an uplink the satellite doesn't finish, and any of its checks (the table above, plus the file's
+  timestamp in `command_timestamps`) that doesn't show within `uplink_settle_s` of its pass. A command the satellite
+  logs as not implemented is a warn event instead.
 - `telemetry`: compares every beacon with the flatsat's log (fuel gauge readings, state, boot time, UHF health) and
   warns on the first mismatch of each kind.
 

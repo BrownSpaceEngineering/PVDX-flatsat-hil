@@ -125,7 +125,7 @@ class Ground:
 
     # ---------- A pass ----------
 
-    def _await(self, report, wanted, resend, deadline, replies=()):
+    def _await(self, report, wanted, resend, deadline, replies=(), notifs=None):
         """Waits for one of the directives in wanted, re-sending `resend` every retry period (UHF_MAX_RETRIES times).
         replies maps a duplicate the satellite sends (showing our last reply was lost) to what to send back. Returns the
         directive received, or None on giving up or reaching deadline."""
@@ -147,22 +147,24 @@ class Ground:
                 if tries >= self.max_retries:
                     return None
                 tries += 1
-                self.send_directive(resend)
+                self.send_directive(resend, (notifs or {}).get(resend, 0))
                 report.resent += 1
                 next_send = time.monotonic() + self.retry_s
         return None
 
-    def run_pass(self, duration_s, uplink=None, turns=1, max_extra_turns=3):
+    def run_pass(self, duration_s, uplink=None, turns=1, max_extra_turns=3, syn_notifs=None):
         """Opens a link and trades turns with the satellite: `turns` handovers each way, plus up to max_extra_turns
         more while an uplink (cfdp.Uplink) isn't done. In each of the ground's turns it sends the uplink's PDUs, and
         everything the satellite sends in its turns is collected (and CFDP PDUs passed to the uplink). Then it stops
-        transmitting and lets the link time out. Returns a PassReport."""
+        transmitting and lets the link time out. The SYN carries syn_notifs (PUSP notification flags; by default
+        PUSP_NOTIF_ENABLE_TX, so a satellite told to stop transmitting answers again). Returns a PassReport."""
         report = PassReport(time.time(), uplink=uplink)
         deadline = time.monotonic() + duration_s
         t0 = time.monotonic()
-        self.send_directive("SYN")
+        syn_notifs = self.c["PUSP_NOTIF_ENABLE_TX"] if syn_notifs is None else syn_notifs
+        self.send_directive("SYN", syn_notifs)
         report.sent += 1
-        if self._await(report, {"SYN_ACK"}, "SYN", deadline) is None:
+        if self._await(report, {"SYN_ACK"}, "SYN", deadline, notifs={"SYN": syn_notifs}) is None:
             report.failure = "no SYN_ACK"
             return report
         report.established = True

@@ -25,12 +25,25 @@ serial = ""                                  # HackRF serial number, if more tha
 tx_coded = true                              # Code the ground's frames like the satellite's, once mrfsk.py's code is confirmed
 # uplink_settle_s = 300                      # How long after a pass a command may take to show in telemetry (default:
                                              # the link timeout plus three beacon periods)
+# silence_grace_s = 45                       # After transmit_off, how long after the pass beacons may still come
+                                             # (default: the link timeout plus a beacon burst plus 5 s)
 
 [radio.commands]
-# What each pass uplinks (soak/uplinks.py): SET_UNIX_TIME every pass, plus one step of the rotation
+# What each pass uplinks (soak/uplinks.py): SET_UNIX_TIME every pass, plus the next step of `rotation`. Leave out the
+# steps you don't want (an empty list uplinks only SET_UNIX_TIME); see soak/uplinks.py for what each one checks
 set_unix_time = true
-adcs_opmode = true                           # Detumble-only, then back to pointing
-toggle_device = "CAMERA_ID"                  # A device_id_t to disable, then enable again ("" for none)
+rotation = [
+    "adcs_detumble", "adcs_point",           # SET_ADCS_OP_MODE
+    "device_off", "device_on",               # ENABLE_DISABLE_DEVICE on toggle_device
+    "transmit_off", "transmit_on",           # TRANSMIT_ON_OFF (the next pass's SYN turns transmit back on)
+    "update_display",                        # UPDATE_DISPLAY: an 8 KB file
+    "take_iv_curve", "send_iv_curve",        # TAKE_IV_CURVE, SEND_IV_CURVE
+    "take_photo", "send_photo",              # TAKE_PHOTO, SEND_PHOTO
+    "set_kepler", "adcs_params",             # SET_KEPLER_COEFF, ADCS_UPDATE_PARAMS
+    "set_power_mode",                        # SET_PWR_MODE
+    "reboot",                                # REBOOT: a commanded reboot after the pass
+]
+toggle_device = "CAMERA_ID"                  # The device_id_t device_off and device_on toggle
 
 [environment]
 update_s = 10                                # How often the tester's inputs follow the orbit

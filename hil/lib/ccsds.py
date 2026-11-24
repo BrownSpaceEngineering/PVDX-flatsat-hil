@@ -41,7 +41,7 @@ HEADER_MACROS = ["src/ccsds/ccsds.h", "src/ccsds/spp.h", "src/ccsds/radio_routin
 ENUMS = [("src/tasks/cfdp/uplink_parse.h", "uplink_cmd_type_e"), ("src/tasks/uhf_radio/pusp.h", "pusp_directive"),
          ("src/telemetry/telemetry.h", "tel_device_status_t"), ("src/telemetry/telemetry.h", "tel_adcs_opmode_t"),
          ("src/ccsds/radio_routing.h", "radio_stream_t"), ("src/globals.h", "device_id_t"),
-         ("src/tasks/uhf_radio/uhf_radio_task.h", "uhf_state")]
+         ("src/tasks/uhf_radio/uhf_radio_task.h", "uhf_state"), ("src/globals.h", "operation_t")]
 
 ERRORS = {1: "bad arguments", 2: "USLP frame rejected", 3: "not an unsegmented frame of space packets",
           4: "space packet rejected", 5: "space packet shorter than its secondary header", 6: "SPP wrap failed",
@@ -246,6 +246,16 @@ def enum(header, name):
     """{member: value} of one of the enums in ENUMS, in declaration order."""
     c = constants()
     return {m: c[m] for m in _enum_members(header, name)}
+
+
+def header_int(header, name):
+    """An integer macro from a PVDXos header the host library doesn't build (e.g. PEROVSKITE_STEP_COUNT), read as
+    text: only a plain number (with u/l suffixes) is accepted, anything else raises."""
+    match = re.search(r"^\s*#\s*define\s+" + name + r"\s+\(?\s*(0[xX][0-9a-fA-F]+|\d+)[uUlL]*\s*\)?\s*(?://.*)?$",
+                      _source(header), re.M)
+    if not match:
+        raise RuntimeError(f"no plain integer #define {name} in {header}; its format changed")
+    return int(match.group(1), 0)
 
 
 def routes():

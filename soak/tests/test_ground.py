@@ -336,7 +336,9 @@ def apply_uplink(tel, file, now):
         kind, size = struct.unpack(">HI", file[pos:pos + 6])
         data = file[pos + 6:pos + 6 + size]
         pos += 6 + size
-        if kind == C["SET_UNIX_TIME"]:
+        if kind == C["TRANSMIT_ON_OFF"]:
+            tel["pending_tx"] = data[0] == 1  # Applied when the pass ends (uplink_commands_pass_exit())
+        elif kind == C["SET_UNIX_TIME"]:
             tel["utc_offset"] = struct.unpack(">I", data)[0] - now
             tel["adcs.flags"] |= C["TEL_ADCS_FLAG_UTC_VALID"]
         elif kind == C["SET_ADCS_OP_MODE"]:
@@ -363,7 +365,8 @@ class FakeSatellite:
         self.cfdp = FakeCfdp()
         self.tel = telemetry.decode(_sample())
         self.tel.update({"adcs.flags": 0, "adcs.opmode": 0, "camera.health": 0, "uhf_health": 0, "utc_offset": None,
-                         "command_timestamps": [0] * 16})
+                         "command_timestamps": [0] * 16, "pending_tx": None, "timestamp": 0, "boot_timestamp": 0})
+        self.tx_enabled = True
         self.applied = 0
         self.beacon_every_s = beacon_every_s
         self.next_beacon = time.monotonic()
@@ -407,6 +410,11 @@ class FakeSatellite:
                 if f.apid == C["CCSDS_APID_PUSP"]:
                     assert len(f.data) == 2, "a PUSP packet is the directive and its notifications"
                     directive = self.names.get(f.data[0])
+                    # dispatch_pusp_immediate_cmd(): the notifications act before the directive
+                    if f.data[1] & C["PUSP_NOTIF_ENABLE_TX"]:
+                        self.tx_enabled = True
+                    elif f.data[1] & C["PUSP_NOTIF_DISABLE_TX"]:
+                        self.tx_enabled = False
                 else:
                     data = True
                     self.forwarded.append(f.data)
@@ -429,6 +437,10 @@ class FakeSatellite:
     def step(self, directive, data):
         if self.state != "LISTEN" and time.monotonic() - self.last_heard > self.link_timeout_s:
             self.enter("LISTEN")
+            if self.tel["pending_tx"] is not None:  # The pass is over: uplinked commands take effect
+                self.tx_enabled, self.tel["pending_tx"] = self.tel["pending_tx"], None
+        if not self.tx_enabled:
+            return  # Listens only: no beacons, and a SYN is ignored (listen_proc())
         if directive == "SYN" and self.state != "LISTEN":  # uhf_link_check(): the ground restarted the link
             self.pusp("SYN_ACK")
             self.enter("SYN_RECV", retry=True)
@@ -437,7 +449,7 @@ class FakeSatellite:
             if directive == "SYN":
                 self.pusp("SYN_ACK")
                 self.enter("SYN_RECV", retry=True)
-            elif self.beacon_every_s and time.monotonic() >= self.next_beacon:
+            elif self.beacon_every_s and time.monotonic() >= self.next_beacon and self.tx_enabled:
                 self.beacon()
                 self.next_beacon = time.monotonic() + self.beacon_every_s
         elif self.state == "SYN_RECV":
@@ -646,18 +658,18 @@ def test_radio_monitor_reports_unreadable_frames_failed_passes_and_fec():
     assert m.metrics()["fec_viterbi"] == 1 and m.metrics()["fec_bit_error_rate"] == 0.003
 
 
-def _uplink_monitor(settle_s=100):
+def _uplink_monitor(settle_s=100, silence_grace_s=40):
     import monitors
 
     events = []
-    return monitors.Uplinks(events.append, C, settle_s=settle_s, beacon_age_s=10), events
+    return monitors.Uplinks(events.append, C, settle_s=settle_s, beacon_age_s=10, silence_grace_s=silence_grace_s), events
 
 
-def _finished_report(seq=1):
+def _finished_report(seq=1, start=0):
     transfer = cfdp.Uplink(b"file", seq=seq)
     transfer.finished = {"condition_code": 0, "delivery_code": 1}
     transfer.fin_acked = True
-    return ground.PassReport(0, established=True, uplink=transfer)
+    return ground.PassReport(start, established=True, uplink=transfer)
 
 
 def _tel(**fields):
@@ -667,42 +679,67 @@ def _tel(**fields):
     return tel
 
 
+def _plan(step, now=1000, **commands):
+    import uplinks
+
+    config = {"radio": {"commands": {"set_unix_time": True, "rotation": [step] if step else [], **commands}}}
+    return uplinks.plan(config, 0, now)
+
+
 def test_uplink_monitor_confirms_commands_in_telemetry():
     m, events = _uplink_monitor()
-    commands = [{"name": "SET_UNIX_TIME", "value": 1000},
-                {"name": "SET_ADCS_OP_MODE", "value": 1},
-                {"name": "ENABLE_DISABLE_DEVICE", "device_name": "CAMERA_ID", "device": C["CAMERA_ID"], "enabled": False}]
-    m.on_pass(1000, _finished_report(), commands, file_timestamp=999)
+    m.on_pass(1000, _finished_report(), _plan("adcs_detumble", now=999))
     m.on_telemetry(1010, _tel())  # Nothing applied yet
     m.on_tick(1050)
     assert m.confirmed == 0 and not [e for e in events if e.severity == "fail"]
-    m.on_telemetry(1060, _tel(timestamp=1058, adcs__flags=C["TEL_ADCS_FLAG_UTC_VALID"], adcs__opmode=1,
-                              camera__health=C["TEL_DEVICE_STATUS_DISABLED"], command_timestamps=[999] + [0] * 15))
+    m.on_telemetry(1060, _tel(timestamp=1058, adcs__flags=C["TEL_ADCS_FLAG_UTC_VALID"],
+                              adcs__opmode=C["TEL_ADCS_OPMODE_DETUMBLE_ONLY"], command_timestamps=[999] + [0] * 15))
     m.on_tick(2000)
-    assert m.confirmed == 4 and m.unconfirmed == 0 and not m.pending
+    assert m.confirmed == 3 and m.unconfirmed == 0 and not m.pending
     assert [e.severity for e in events].count("warn") == 1  # The satellite's Finished says delivery incomplete
 
 
 def test_uplink_monitor_fails_what_never_shows_and_failed_transfers():
     m, events = _uplink_monitor(settle_s=100)
-    m.on_pass(0, _finished_report(), [{"name": "SET_ADCS_OP_MODE", "value": 1}], file_timestamp=5)
-    m.on_telemetry(50, _tel(command_timestamps=[5] + [0] * 15))  # Received, but the mode never changes
+    m.on_pass(0, _finished_report(), _plan("adcs_detumble", now=5))
+    m.on_telemetry(50, _tel(timestamp=50, adcs__flags=C["TEL_ADCS_FLAG_UTC_VALID"], command_timestamps=[5] + [0] * 15))
     m.on_tick(101)
     fails = [e.message for e in events if e.severity == "fail"]
-    assert len(fails) == 1 and "ADCS opmode 1" in fails[0] and m.confirmed == 1
+    assert len(fails) == 1 and "ADCS opmode" in fails[0] and m.confirmed == 2
     unfinished = ground.PassReport(0, established=True, failure="the uplink didn't finish", uplink=cfdp.Uplink(b"x", 2))
-    m.on_pass(200, unfinished, [], file_timestamp=6)
+    m.on_pass(200, unfinished, _plan(None))
     assert m.failed == 1 and "not finished" in events[-1].message
 
 
 def test_uplink_monitor_warns_on_commands_the_satellite_ignores():
     m, events = _uplink_monitor()
-    toggle = {"name": "ENABLE_DISABLE_DEVICE", "device_name": "CAMERA_ID", "device": C["CAMERA_ID"], "enabled": False}
-    m.on_pass(0, _finished_report(), [toggle], file_timestamp=5)
+    m.on_pass(0, _finished_report(), _plan("device_off", now=5))
     m.on_line(1, f"[INFO|uplink]: uplink: command type {C['ENABLE_DISABLE_DEVICE']} not implemented yet, ignored")
+    m.on_pass(10, _finished_report(), _plan("adcs_params", now=8))
+    m.on_line(11, f"[WARNING|adcs]: adcs: operation {C['OPERATION_ADCS_UPDATE_PARAMS']} not implemented, ignoring")
+    m.on_pass(20, _finished_report(), _plan("set_power_mode", now=18))
+    m.on_line(21, f"[INFO|uplink]: uplink: command type {C['SET_PWR_MODE']} not implemented yet, ignored")
     m.on_tick(1000)
-    assert not [e for e in events if e.severity == "fail" and "CAMERA" in e.message]
-    assert any("not implemented" in e.message for e in events if e.severity == "warn")
+    warned = [e.message for e in events if e.severity == "warn" and "not implemented" in e.message]
+    assert [w.split()[3].rstrip(":") for w in warned] == ["ENABLE_DISABLE_DEVICE", "ADCS_UPDATE_PARAMS", "SET_PWR_MODE"]
+    assert not [e for e in events if e.severity == "fail" and ("CAMERA" in e.message or "TLE" in e.message)]
+
+
+def test_uplink_monitor_log_boot_and_silence_checks():
+    m, events = _uplink_monitor(settle_s=300, silence_grace_s=40)
+    m.on_pass(100, _finished_report(start=90), _plan("update_display"))
+    m.on_line(95, "[INFO|uplink]: uplink: display image saved, shown once the pass ends")  # During the pass
+    m.on_pass(200, _finished_report(start=190), _plan("reboot"))
+    m.on_line(230, "[INFO|main]: [+] Built from commit: abc1234")
+    m.on_pass(300, _finished_report(start=290), _plan("transmit_off"), next_pass=500)
+    m.on_telemetry(320, _tel())  # Before the grace ends: the satellite's link hadn't timed out yet
+    m.on_tick(501)
+    confirmed = [e.message for e in events if e.message.startswith("confirmed")]
+    assert "confirmed: display image saved" in confirmed and "confirmed: commanded reboot" in confirmed
+    assert "confirmed: no beacon after TRANSMIT_ON_OFF off" in confirmed
+    m.on_pass(600, _finished_report(start=590), _plan("transmit_off"), next_pass=900)
+    m.on_telemetry(700, _tel())
+    assert any("beacon was heard" in e.message for e in events if e.severity == "fail")
 
 
 def test_telemetry_monitor_compares_beacons_with_the_log():
@@ -732,7 +769,9 @@ def test_ground_station_runs_passes_in_the_soak(tmp_path):
     with open(os.path.join(HERE, "..", "config.toml"), "rb") as f:
         config = tomllib.load(f)
     config["radio"]["enabled"] = True
-    config["radio"]["uplink_settle_s"] = 4
+    config["radio"]["uplink_settle_s"] = 3
+    config["radio"]["silence_grace_s"] = 1
+    config["radio"]["commands"]["rotation"] = ["adcs_detumble", "transmit_off", "transmit_on"]
     runner = run.Runner(config, str(tmp_path), {"id": "t", "start": time.time(), "config": "", "mode": "live"},
                         echo=False, radio_constants=C)
     ground_radio, sat_radio = hackrf.LoopbackRadio.pair()
@@ -741,7 +780,7 @@ def test_ground_station_runs_passes_in_the_soak(tmp_path):
     station = run.GroundStation(runner, config, passes, radio=ground_radio)
     station.start()
     try:
-        end = time.monotonic() + 11
+        end = time.monotonic() + 15
         while time.monotonic() < end:
             runner.tick(time.time())
             time.sleep(0.1)
@@ -756,10 +795,12 @@ def test_ground_station_runs_passes_in_the_soak(tmp_path):
     assert not fails, [(e["monitor"], e["message"]) for e in runner.events.all()]
     assert runner.radio.beacons > 0 and runner.radio.passes >= 2 and runner.radio.passes_failed == 0
     assert runner.uplinks.sent >= 2 and runner.uplinks.failed == 0
-    # Each pass's file timestamp, SET_UNIX_TIME, and the first two rotation steps (detumble-only, then pointing)
-    assert runner.uplinks.confirmed >= 5, [e["message"] for e in runner.events.all()]
+    messages = [e["message"] for e in runner.events.all()]
     records = [json.loads(line) for line in (tmp_path / "passes.jsonl").read_text().splitlines()]
-    assert [r["commands"][1]["name"] for r in records][:2] == ["SET_ADCS_OP_MODE", "SET_ADCS_OP_MODE"]
+    assert [r["step"] for r in records][:3] == ["adcs_detumble", "transmit_off", "transmit_on"]
+    assert "confirmed: ADCS opmode TEL_ADCS_OPMODE_DETUMBLE_ONLY" in messages
+    assert "confirmed: no beacon after TRANSMIT_ON_OFF off" in messages, messages
+    assert "confirmed: beacons after TRANSMIT_ON_OFF on" in messages, messages
     assert all(r["uplink"]["succeeded"] for r in records)
     assert (tmp_path / "telemetry.jsonl").read_text().count('"eps.voltage"') == runner.radio.beacons
 
@@ -781,19 +822,30 @@ def test_the_satellite_rejects_a_bad_uplink():
     assert ccsds.parse_uplink(uplink.build([uplink.set_adcs_op_mode(7)], 0)) is None, "an opmode that doesn't exist"
 
 
-def test_the_pass_plan_rotates_and_parses():
+def test_every_step_parses_with_the_satellites_parser():
     import uplinks
 
-    config = {"radio": {"commands": {"set_unix_time": True, "adcs_opmode": True, "toggle_device": "CAMERA_ID"}}}
-    seen = []
-    for number in range(5):
-        commands, data, ts = uplinks.plan(config, number, 1_800_000_000 + number)
-        assert commands[0] == {"name": "SET_UNIX_TIME", "value": 1_800_000_000 + number} and ts == 1_800_000_000 + number
-        assert ccsds.parse_uplink(data) == [C[c["name"]] for c in commands]
-        seen.append((commands[1]["name"], commands[1].get("value", commands[1].get("enabled"))))
-    assert seen == [("SET_ADCS_OP_MODE", C["TEL_ADCS_OPMODE_DETUMBLE_ONLY"]), ("SET_ADCS_OP_MODE", C["TEL_ADCS_OPMODE_POINT"]),
-                    ("ENABLE_DISABLE_DEVICE", False), ("ENABLE_DISABLE_DEVICE", True),
-                    ("SET_ADCS_OP_MODE", C["TEL_ADCS_OPMODE_DETUMBLE_ONLY"])]
+    config = {"radio": {"commands": {"set_unix_time": True}}}
+    assert uplinks.rotation(config) == list(uplinks.STEPS)
+    for number, step in enumerate(uplinks.STEPS):
+        p = uplinks.plan(config, number, 1_800_000_000 + number)
+        assert p["step"] == step and p["file_timestamp"] == 1_800_000_000 + number
+        assert p["commands"][0] == {"name": "SET_UNIX_TIME", "value": 1_800_000_000 + number}
+        assert ccsds.parse_uplink(p["data"]) == [C[c["name"]] for c in p["commands"]], step
+        assert all(c["type"] == C[c["command"]] for c in p["checks"])
+    assert len(uplinks.plan(config, 6, 0)["data"]) > C["UPLINK_DISPLAY_BITMAP_SIZE"]  # update_display
+
+
+def test_the_rotation_is_the_configured_subset():
+    import uplinks
+
+    config = {"radio": {"commands": {"set_unix_time": False, "rotation": ["reboot", "transmit_off"]}}}
+    assert [uplinks.plan(config, n, 0)["step"] for n in range(4)] == ["reboot", "transmit_off"] * 2
+    assert [c["name"] for c in uplinks.plan(config, 0, 0)["commands"]] == ["REBOOT"]
+    assert uplinks.plan(config, 0, 0)["reboot"] and uplinks.plan(config, 1, 0)["transmit_off"]
+    assert uplinks.plan({"radio": {"commands": {"set_unix_time": False, "rotation": []}}}, 0, 0)["data"] == b""
+    with pytest.raises(ValueError, match="unknown"):
+        uplinks.rotation({"radio": {"commands": {"rotation": ["reboot", "warp_drive"]}}})
 
 
 # ---------- Pinning the RSC code ----------

@@ -65,6 +65,7 @@ class Runner:
         self.monitors = monitors.build(config, self.emit, radio_constants)
         self.radio = next((m for m in self.monitors if m.name == "radio"), None)
         self.uplinks = next((m for m in self.monitors if m.name == "uplink"), None)
+        self.resets = next((m for m in self.monitors if m.name == "resets"), None)
         self.telemetry = next((m for m in self.monitors if m.name == "telemetry"), None)
         self.pvdx_commit = pvdx_commit() if radio_constants is not None else None
         self.posted = queue.Queue()  # Work from other threads (the ground station), run on the main loop's thread
@@ -315,24 +316,34 @@ class GroundStation(threading.Thread):
         import cfdp
 
         now = time.time()
-        commands, data, file_timestamp = uplinks.plan(self.config, number, now)
-        transfer = cfdp.Uplink(data, seq=int(now)) if data else None
+        plan = uplinks.plan(self.config, number, now)
+        transfer = cfdp.Uplink(plan["data"], seq=int(now)) if plan["data"] else None
         self.runner.post(lambda t=now, d=duration_s: self.runner.radio.pass_started(t, d))
         result = self.ground.run_pass(duration_s, uplink=transfer, turns=self.turns)
         record = {"time": report.iso(result.start), "established": result.established,
                   "establish_s": result.establish_s, "turns_given": result.turns_given,
                   "turns_taken": result.turns_taken, "sent": result.sent, "resent": result.resent,
-                  "received": len(result.received), "failure": result.failure, "commands": commands}
+                  "received": len(result.received), "failure": result.failure, "step": plan["step"],
+                  "commands": plan["commands"]}
         if transfer is not None:
-            record["uplink"] = {"seq": transfer.seq, "bytes": len(data), "succeeded": transfer.succeeded,
+            record["uplink"] = {"seq": transfer.seq, "bytes": len(plan["data"]), "succeeded": transfer.succeeded,
                                 "finished": transfer.finished is not None, "turns": transfer.turns,
                                 "resent_pdus": transfer.resent_pdus, "events": transfer.events}
         with open(self.pass_log, "a") as f:
             f.write(json.dumps(record) + "\n")
         end = time.time()
+        p = self.passes
+        next_pass = p.start + p.offset_s + (p.number(now) + 1) * p.interval_s
         self.runner.post(lambda r=result: self.runner.radio.on_pass(end, r))
+        delivered = transfer is not None and transfer.succeeded
+        if delivered and plan["transmit_off"]:
+            self.runner.post(lambda: self.runner.radio.expect_silence(next_pass))
+        if delivered and plan["reboot"] and self.runner.resets is not None:
+            # The satellite reboots once its link times out after the pass
+            link_timeout_s = self.runner.radio.link_timeout_s
+            self.runner.post(lambda: self.runner.resets.expect_reboot(end + link_timeout_s))
         if self.runner.uplinks is not None:
-            self.runner.post(lambda r=result: self.runner.uplinks.on_pass(end, r, commands, file_timestamp))
+            self.runner.post(lambda r=result: self.runner.uplinks.on_pass(end, r, plan, next_pass=next_pass))
         return result
 
     def run(self):
@@ -457,6 +468,7 @@ def main():
         radio_constants = ccsds.constants()
         code, _, _ = mrfsk.check_phy(ccsds.phy_config())
         telemetry.layout()
+        print(f"uplink rotation: {uplinks.rotation(config)}")
         print(f"ground station: PVDXos radio code from {paths.PVDX}; coded frames use {code.name}"
               f"{'' if code.confirmed else ' (unconfirmed: read from the systematic bits until fit_rsc.py pins it)'}")
     runner = Runner(config, run_dir, info, stop_on_failure=args.stop_on_failure, radio_constants=radio_constants)
